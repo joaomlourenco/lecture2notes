@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# macOS / editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Output of lecture2notes (folders named "<recording> notes" next to the recordings)
+* notes/
+
+# Recordings, audio and slides used to try the script
+*.mov
+*.mp4
+*.m4v
+*.mkv
+*.avi
+*.webm
+*.wav
+*.mp3
+*.m4a
+*.pptx
+*.ppt
+*.key
+
+# Working files the script writes next to its output
+*.slidenumbers.json
+*.scenes.json
+*.meta.json
+.*.video/
+.*.translate/
