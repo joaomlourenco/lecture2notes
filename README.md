@@ -373,5 +373,5 @@ separate software with their own licenses.
 - Audio and video: [FFmpeg](https://ffmpeg.org/).
 - OCR: [Tesseract](https://github.com/tesseract-ocr/tesseract) (Apache 2.0) and [Pillow](https://python-pillow.org/).
 - PDF: [pandoc](https://pandoc.org/) and TeX Live / MacTeX.
-- Version 0.1.2 (2026-11-13); see [RELEASE_NOTES.md](RELEASE_NOTES.md). `python3 lecture2notes.py --version` prints it.
+- Version 0.2 (2026-11-13); see [RELEASE_NOTES.md](RELEASE_NOTES.md). `python3 lecture2notes.py --version` prints it.
 - Author: João M. Lourenço (NOVA School of Science and Technology, NOVA University Lisbon), with help from Claude (Anthropic).

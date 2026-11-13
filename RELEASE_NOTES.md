@@ -1,6 +1,6 @@
 # Release notes
 
-## Unreleased
+## v0.2 — 2026-11-13
 
 - The script now offers to install what is missing, instead of only printing instructions: when a needed program is
   missing, in a terminal, it shows the commands and asks. Homebrew is used whenever possible, and if Homebrew is
