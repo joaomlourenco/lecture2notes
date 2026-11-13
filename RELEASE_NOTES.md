@@ -1,5 +1,12 @@
 # Release notes
 
+## Unreleased
+
+- The prompt for the student notes no longer contains a built-in author, course, date or title. The example title block
+  uses placeholders, and the new option `--notes-author` sets the author line (without it, Claude takes the programme,
+  institution and lecturer from the slides or `--notes-context`). Course-specific examples were removed from the
+  README and the help texts.
+
 ## v0.1.1 — 2026-11-13
 
 - The project is now released under the [MIT License](LICENSE) (copyright (c) 2026 João Lourenço). v0.1 was published

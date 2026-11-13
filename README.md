@@ -108,7 +108,7 @@ python3 lecture2notes.py ~/Teaching/2026/recordings/
 python3 lecture2notes.py slides-en.pptx aula.mov
 
 # the recording failed: student notes from the slides and the reading (see "Without a recording" below)
-python3 lecture2notes.py "T11 Universality of Consensus.pptx" --notes-extra "Bibliography/T11 chapter.pdf"
+python3 lecture2notes.py "Lecture 11.pptx" --notes-extra "Readings/chapter 11.pdf"
 
 # retune the alignment without transcribing again (the JSON is reused automatically)
 python3 lecture2notes.py slides.pptx lecture.mov --switch-penalty 0.3
@@ -169,7 +169,8 @@ folder.
 
 ```bash
 python3 lecture2notes.py slides.pptx lecture.mp4 --student-notes \
-    --notes-context "first-year MSc students; lecturer Prof. X" --notes-course "Concurrent Systems 2026-27" \
+    --notes-context "first-year MSc students; lecturer Prof. X" --notes-course "Course Name 2026-27" \
+    --notes-author "MSc in Biology · University X · Prof. X" \
     --notes-extra case-study.pdf
 ```
 
@@ -213,16 +214,19 @@ transcript (adding what was said and discussed) and writes `CHANGES.md`.
 The notes open with a title block in this shape (the prompt shows it as the model):
 
 ```
-Why Concurrency? Course Organisation and the Challenges of Concurrent Programs
-Lecture notes for lectures 1 and 2 · Concurrent Systems 2026-27
-Master in Computer Science and Engineering · NOVA FCT · Prof. João Lourenço
-Lecture of 17 September 2026
+<A specific title naming the subject of the lecture>
+Lecture notes for <lecture or session> · <course name and year>
+<Programme> · <Institution> · <Lecturer(s)>
+Lecture of <day month year>
 ```
 
-Claude takes the programme, institution, lecturer and date from the slides; give them in `--notes-context` when the
-slides do not show them.
+The title and the subtitle come from the lecture. The author line is what you give with `--notes-author` (for example
+`--notes-author "MSc in Biology · University X · Prof. Y"`). Without it, Claude takes the programme, institution and
+lecturer from the slides, or from `--notes-context`, and leaves the line out if they are not shown anywhere. Nothing
+about a person or a course is built into the script.
 
-**Options:** `--notes-language` (default English), `--notes-context`, `--notes-course` (PDF running header),
+**Options:** `--notes-language` (default English), `--notes-context`, `--notes-author` (the author line),
+`--notes-course` (PDF running header),
 `--notes-extra FILE` (repeatable), `--notes-prompt FILE`, `--notes-model`, `--notes-budget USD` (API accounts),
 `--notes-fresh`, `--claude-command`.
 

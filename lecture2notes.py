@@ -1857,12 +1857,12 @@ $changes_output
 - A YAML header in this pattern (adapt the words, keep the shape):
 
   ```yaml
-  title: "Why Concurrency? Course Organisation and the Challenges of Concurrent Programs"
-  subtitle: "Lecture notes for lectures 1 and 2 · Concurrent Systems 2026-27"
-  author: "Master in Computer Science and Engineering · NOVA FCT · Prof. João Lourenço"
-  date: "Lecture of 17 September 2026"
+  title: "<Specific title naming the subject of the lecture>"
+  subtitle: "Lecture notes for <lecture or session> · <course name and year>"
+  author: "$author"
+  date: "Lecture of <day month year>"
   lang: en-GB
-  keywords: [concurrency, parallelism, threads, state explosion]
+  keywords: [keyword one, keyword two, keyword three]
   abstract: |
     Two to four sentences on what the lecture covered and what the notes contain.
   ```
@@ -1984,7 +1984,7 @@ $changes_output
   if the slides cover it.
 - The body in parts (unnumbered `# Part I · …` headings) and numbered chapters, which are level-1 headings too
   (`# Chapter title`, numbered 1, 2, 3 across the parts), with sections at `##`. Each chapter starts with an italic line
-  such as `*Slides: deck name, slides 9–12. Reading: Herlihy et al., chapter 6.*`. End major chapters with a
+  such as `*Slides: deck name, slides 9–12. Reading: Author et al., chapter 6.*`. End major chapters with a
   takeaways box.
 - A synthesis when the subject lends itself to it (comparisons, a table of methods or results).
 - Review questions (10–15) with short answers, a glossary (Pandoc definition list), sources and further reading (the
@@ -2006,12 +2006,12 @@ $changes_output
 - A YAML header in this pattern (adapt the words, keep the shape):
 
   ```yaml
-  title: "Why Concurrency? Course Organisation and the Challenges of Concurrent Programs"
-  subtitle: "Lecture notes for lectures 1 and 2 · Concurrent Systems 2026-27"
-  author: "Master in Computer Science and Engineering · NOVA FCT · Prof. João Lourenço"
-  date: "Lecture of 17 September 2026"
+  title: "<Specific title naming the subject of the lecture>"
+  subtitle: "Lecture notes for <lecture or session> · <course name and year>"
+  author: "$author"
+  date: "Lecture of <day month year>"
   lang: en-GB
-  keywords: [concurrency, parallelism, threads, state explosion]
+  keywords: [keyword one, keyword two, keyword three]
   abstract: |
     Two to four sentences on what the lecture covered and what the notes contain.
   ```
@@ -2532,6 +2532,8 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
     prompt = fill_template(template, {
         "lecture": lecture, "language": args.notes_language,
         "context": args.notes_context or "none given; infer the course and audience from the slides.",
+        "author": args.notes_author or "<programme> · <institution> · <lecturer(s)>, as the slides or the context above show "
+                                       "them; leave this line out if neither does",
         "transcript": rel_transcript, "extras": "; ".join(extras) if extras else "none.", "notes_file": notes_file,
         "previous": revise if revising else "",
         "changes_output": ("- `CHANGES.md`: what changed from the previous version and why (corrections, additions, "
@@ -2744,7 +2746,7 @@ def main() -> int:
                     "large-v3-turbo); with --engine mlx also a Hugging Face repository or a local model folder")
     ap.add_argument("--language", help="spoken language, e.g. en or pt (default: whisper detects it)")
     ap.add_argument("--whisper-args", help="extra arguments for the whisper program of the engine, as one quoted string "
-                    "(with mlx, given as options of mlx_whisper.transcribe, e.g. \"--initial-prompt 'Concurrency lecture'\")")
+                    "(with mlx, given as options of mlx_whisper.transcribe, e.g. \"--initial-prompt 'Lecture on algorithms'\")")
     ap.add_argument("--keep-context", action="store_true",
                     help="let whisper use the text of the previous window as context (more consistent wording, but long "
                          "recordings can fall into repetition loops; off by default)")
@@ -2790,6 +2792,9 @@ def main() -> int:
     sn.add_argument("--notes-language", default="English", help="language of the student notes (default English)")
     sn.add_argument("--notes-context", help="what Claude should know: course, audience, lecturer, e.g. \"MBA students; lecturer Prof. X\"")
     sn.add_argument("--notes-course", help="course name for the running header of the PDF (default: the lecture name)")
+    sn.add_argument("--notes-author", help="the author line of the notes, e.g. \"MSc in Biology · University X · Prof. Y\" "
+                    "(default: Claude takes the programme, institution and lecturer from the slides or from --notes-context, "
+                    "and leaves the line out if they are not shown)")
     sn.add_argument("--notes-extra", action="append", help="another document for the notes (PDF, PPTX, Markdown, text): readings, "
                     "case studies, slides given as handouts (repeat for several); essential when there is no recording")
     sn.add_argument("--notes-prompt", help="use this file as the prompt template instead of the built-in one "
