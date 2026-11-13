@@ -1,6 +1,6 @@
 # Release notes
 
-## Unreleased
+## v0.1.2 — 2026-11-13
 
 - The prompt for the student notes no longer contains a built-in author, course, date or title. The example title block
   uses placeholders, and the new option `--notes-author` sets the author line (without it, Claude takes the programme,
