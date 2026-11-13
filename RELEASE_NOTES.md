@@ -1,5 +1,13 @@
 # Release notes
 
+## v0.1.1 — 2026-11-13
+
+- The project is now released under the [MIT License](LICENSE) (copyright (c) 2026 João Lourenço). v0.1 was published
+  without a license file; use v0.1.1 or later.
+- Added `SPDX-License-Identifier: MIT` to the script header, `__license__` in the code, and a License section in the
+  README.
+- No change in behaviour.
+
 ## v0.1 — 2026-11-13
 
 First public release.

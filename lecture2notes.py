@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # lecture2notes
 # Copyright (c) 2026 João Lourenço <joao.lourenco@fct.unl.pt>
-# Version: 0.1
+# SPDX-License-Identifier: MIT (see the LICENSE file)
+# Version: 0.1.1
 # Date:    2026-11-13
 """lecture2notes: classroom recording (MOV) [+ slides (PPTX or PDF)] -> transcript and reading notes (Markdown + PDF).
 
@@ -86,10 +87,11 @@ from collections import Counter
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-__version__ = "0.1"  # keep in step with the header above and with RELEASE_NOTES.md
+__version__ = "0.1.1"  # keep in step with the header above, README.md and RELEASE_NOTES.md
 __date__ = "2026-11-13"
 __author__ = "João Lourenço <joao.lourenco@fct.unl.pt>"
 __copyright__ = "Copyright (c) 2026 João Lourenço"
+__license__ = "MIT"
 
 NS = {
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
