@@ -76,6 +76,7 @@ import json
 import math
 import operator
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -192,6 +193,8 @@ def missing_message(tools: list[str], why: str) -> str:
 
 def require(tools: list[str], why: str) -> None:
     missing = [t for t in tools if not ENV.get(t)]
+    if missing and offer_install(missing, why):
+        missing = [t for t in tools if not ENV.get(t)]
     if missing:
         sys.exit("error: " + missing_message(missing, why))
 
@@ -200,12 +203,157 @@ _noted: set[str] = set()
 
 
 def note_missing(tools: list[str], why: str) -> bool:
-    """True if all `tools` are there; otherwise print (once) what is missing and how to install it."""
+    """True if all `tools` are there; otherwise offer to install them or, failing that, print (once) what is missing
+    and how to install it."""
     missing = [t for t in tools if not ENV.get(t)]
     if missing and why not in _noted:
         _noted.add(why)
-        print("note: " + missing_message(missing, why))
+        if offer_install(missing, why):
+            missing = [t for t in tools if not ENV.get(t)]
+        if missing:
+            print("note: " + missing_message(missing, why))
     return not missing
+
+
+# ----------------------------------------------------------------------------------------------- installing what is missing
+# When a tool is needed and missing, the script offers to install it: with Homebrew whenever possible (and offers to
+# install Homebrew itself first), otherwise with pip in a virtual environment. It only does so in a terminal, only
+# after a "yes" for the commands it shows, never for LaTeX (big, and best chosen by the user) and never with sudo of its
+# own (the installers ask for the password themselves if they need it).
+INSTALL_MODE = "ask"  # --install: ask (the default), yes (no question per package), no
+_declined: set[str] = set()  # tools the user did not want installed in this run: not asked about again
+HOMEBREW_URL = "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
+BREW_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin")  # where Homebrew lives
+PACKAGE_OF = {  # tool -> the package that provides it. LaTeX is left out on purpose.
+    "ffmpeg": "ffmpeg", "ffprobe": "ffmpeg", "pdftotext": "poppler", "pdfinfo": "poppler", "pdftoppm": "poppler",
+    "pandoc": "pandoc", "tesseract": "tesseract", "pillow": "pillow", "whisper": "openai-whisper", "mlx_whisper": "mlx-whisper"}
+PACKAGE_NOTE = {
+    "openai-whisper": "also installs PyTorch, which is large",
+    "mlx-whisper": "in its own Python environment, ~/.venvs/whisper; the speech model (about 1.6 GB) is downloaded later, on first use",
+    "tesseract": "with tesseract-lang, the data of all the OCR languages",
+}
+
+
+def ensure_brew_on_path() -> None:
+    """Homebrew's folder may be missing from PATH (a shell that never ran `brew shellenv`): add it at the end, so that the
+    tools it installed are found and nothing found before changes."""
+    dirs = os.environ.get("PATH", "").split(os.pathsep)
+    for d in BREW_DIRS:
+        if d not in dirs and (Path(d) / "brew").exists():
+            os.environ["PATH"] = os.pathsep.join(dirs + [d])
+            dirs.append(d)
+
+
+def install_commands(pkg: str, brew: str) -> list[list[str]] | None:
+    """The commands that install a package, or None if this script cannot do it on this machine."""
+    if pkg in ("ffmpeg", "poppler", "pandoc", "openai-whisper"):
+        return [[brew, "install", pkg]]
+    if pkg == "tesseract":
+        return [[brew, "install", "tesseract", "tesseract-lang"]]
+    if pkg == "pillow":
+        if sys.prefix != sys.base_prefix:  # in a virtual environment: pip there
+            return [[sys.executable, "-m", "pip", "install", "pillow"]]
+        if sys.executable.startswith(("/opt/homebrew", "/usr/local")):  # Homebrew's Python: Homebrew's Pillow
+            return [[brew, "install", "pillow"]]
+        return [[sys.executable, "-m", "pip", "install", "--user", "pillow"]]
+    if pkg == "mlx-whisper":
+        if sys.platform == "darwin" and platform.machine() == "arm64":
+            venv = MLX_VENV_BIN.parent.parent
+            return [[sys.executable, "-m", "venv", str(venv)], [str(venv / "bin" / "pip"), "install", "mlx-whisper"]]
+        return None  # mlx needs Apple Silicon: --engine openai
+    return None
+
+
+def confirm(question: str) -> bool:
+    try:
+        return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
+        print()
+        return False
+
+
+def show_cmd(cmd: list[str]) -> str:
+    return " ".join(shlex.quote(c) for c in cmd)
+
+
+def install_homebrew() -> str | None:
+    """Run Homebrew's official installer (it asks for the password and for a keypress itself). Returns brew's path."""
+    print("\nHomebrew is the package manager used to install the missing programs, and it is not installed.")
+    print("Its official installer would be run, with this command:\n")
+    print(f'  /bin/bash -c "$(curl -fsSL {HOMEBREW_URL})"\n')
+    print("It downloads the installer from Homebrew's own repository on GitHub, asks for your password, and takes a few minutes.")
+    if not confirm("Install Homebrew now?"):  # always asked, also with --install yes
+        return None
+    subprocess.run(["/bin/bash", "-c", f'/bin/bash -c "$(curl -fsSL {HOMEBREW_URL})"'])
+    ensure_brew_on_path()
+    brew = shutil.which("brew")
+    if brew:
+        print(f"\nHomebrew is installed ({brew}). The installer printed how to add it to the PATH of your shell: do it (or open a "
+              "new terminal) so that other programs find what it installs; this script finds it by itself.")
+    else:
+        print("note: Homebrew was not installed")
+    return brew
+
+
+def offer_install(missing: list[str], why: str) -> bool:
+    """Offer to install the missing tools (not LaTeX), and do it if the user agrees. Returns True if they are all there
+    afterwards. Does nothing, and returns False, without a terminal, with --install no, or on Windows."""
+    if INSTALL_MODE == "no" or sys.platform == "win32" or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return False
+    pkgs: list[str] = []
+    for t in missing:
+        p = PACKAGE_OF.get(t)
+        if p and t not in _declined and p not in pkgs:
+            pkgs.append(p)
+    if not pkgs:
+        return False
+    brew = shutil.which("brew")
+    plans = {p: install_commands(p, brew or "brew") for p in pkgs}
+    doable = {p: c for p, c in plans.items() if c}
+    msg = missing_message(missing, why)
+    print("\n" + msg[0].upper() + msg[1:])
+    for p in pkgs:
+        if p not in doable:
+            print(f"  - {p}: cannot be installed by this script on this machine; see the install line above")
+    if not doable:
+        _declined.update(missing)
+        return False
+    need_brew = any(Path(c[0]).name == "brew" for cmds in doable.values() for c in cmds)
+    print("\nThese can be installed for you:")
+    for p, cmds in doable.items():
+        print(f"  {p}" + (f"  ({PACKAGE_NOTE[p]})" if p in PACKAGE_NOTE else ""))
+        for c in cmds:
+            print(f"      {show_cmd(c)}")
+    if need_brew and not brew:
+        print("  (these need Homebrew, which is not installed; I would offer to install it first)")
+    if INSTALL_MODE != "yes" and not confirm("Install them now?"):
+        _declined.update(missing)
+        return False
+    if need_brew and not brew:
+        brew = install_homebrew()
+        if brew:
+            doable = {p: install_commands(p, brew) for p in doable}
+        else:  # no Homebrew: what does not need it is still installed
+            doable = {p: c for p, c in doable.items() if c and not any(Path(x[0]).name == "brew" for x in c)}
+    for p, cmds in doable.items():
+        print(f"\ninstalling {p} ...")
+        for c in cmds:
+            print("$ " + show_cmd(c), flush=True)
+            if subprocess.run(c).returncode != 0:
+                print(f"warning: the installation of {p} failed (see above); install it by hand, as described in the install line")
+                break
+    import importlib
+
+    importlib.invalidate_caches()
+    try:  # a pip --user install may have created the user site folder just now
+        import site
+
+        site.addsitedir(site.getusersitepackages())
+    except Exception:
+        pass
+    ENV.update(probe_env())
+    _declined.update(t for t in missing if not ENV.get(t))
+    return all(ENV.get(t) for t in missing if t in PACKAGE_OF)
 
 
 def tool(name: str) -> str:
@@ -379,7 +527,28 @@ def report_env(args) -> int:
     print(f"engine: {args.engine} ({chosen}); model '{args.model}' = {asr_model(args, args.model)}: "
           + ("cached" if cached else f"not cached yet; downloaded on first use into {where}"))
     print("\nall required tools are there" if ok else "\nsome required tools are missing (see above)")
+    if any(PACKAGE_OF.get(t) and not ENV.get(t) for t, _ in rows) and not args.setup:
+        print("to install what is missing (not LaTeX), run:  python3 lecture2notes.py --setup")
     return 0 if ok else 1
+
+
+def setup(args) -> int:
+    """--setup: show what is installed and offer to install what is missing (not LaTeX), then show it again."""
+    report_env(args)
+    wanted = ["ffmpeg", "ffprobe", asr_tool(args), "pandoc", "tesseract", "pillow", "pdftotext", "pdfinfo", "pdftoppm"]
+    missing = [t for t in wanted if not ENV.get(t)]
+    if not missing:
+        print("\nnothing to install (LaTeX is never installed by this script)")
+        return 0
+    if INSTALL_MODE == "no":
+        print("\n--install no: nothing was installed")
+        return 1
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print("\nrun --setup in a terminal to be offered the installation of what is missing")
+        return 1
+    offer_install(missing, "use every feature of lecture2notes")
+    print("\nafter the installation:\n")
+    return report_env(args)
 
 
 # ----------------------------------------------------------------------------------------------- PPTX
@@ -2720,7 +2889,7 @@ def resolve_latex(args) -> None:
     if args.latex:
         return
     args.latex = "yes" if engine else "no"
-    if not engine and not args.check:
+    if not engine and not (args.check or args.setup):
         print("note: no LaTeX engine found, so no PDF files will be made (--latex no); the Markdown files are written. "
               f"To get PDFs, install LaTeX ({install_hint('latex')}) and run again.")
 
@@ -2735,6 +2904,10 @@ def main() -> int:
                     "failed, give student notes from the slides (and --notes-extra readings)")
     ap.add_argument("--version", action="version", version=f"lecture2notes {__version__} ({__date__})")
     ap.add_argument("--check", action="store_true", help="check that the external tools are installed (and how to install them) and exit")
+    ap.add_argument("--setup", action="store_true", help="check the external tools and offer to install the missing ones (not LaTeX), then exit")
+    ap.add_argument("--install", choices=("ask", "yes", "no"), default="ask",
+                    help="what to do when a needed program is missing: ask = offer to install it (Homebrew when possible, only in a "
+                         "terminal; the default); yes = do not ask for each package (Homebrew itself is always asked); no = never install")
     ap.add_argument("--separate", action="store_true", help="each recording is a lecture of its own, with its own output folder")
     ap.add_argument("-o", "--outdir", type=Path, help="output folder (default: '<recording> notes' next to the recording); "
                     "with --separate, the folder where the per-lecture folders go")
@@ -2804,6 +2977,9 @@ def main() -> int:
     sn.add_argument("--notes-fresh", action="store_true", help="start the notes from scratch, ignoring a previous version and its kit")
     sn.add_argument("--claude-command", default="claude", help="the Claude Code program (default: claude)")
     args = ap.parse_args()
+    global INSTALL_MODE
+    INSTALL_MODE = args.install
+    ensure_brew_on_path()
     ENV.update(probe_env())
     resolve_latex(args)
     if args.mlx_command:
@@ -2811,6 +2987,8 @@ def main() -> int:
         if not exe:
             ap.error(f"--mlx-command {args.mlx_command} not found")
         ENV["mlx_whisper"] = str(Path(exe).expanduser())
+    if args.setup:
+        return setup(args)
     if args.check:
         return report_env(args)
     if not args.files:

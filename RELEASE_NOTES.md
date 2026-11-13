@@ -1,5 +1,15 @@
 # Release notes
 
+## Unreleased
+
+- The script now offers to install what is missing, instead of only printing instructions: when a needed program is
+  missing, in a terminal, it shows the commands and asks. Homebrew is used whenever possible, and if Homebrew is
+  missing the script offers to run its official installer (always asked). mlx-whisper goes into a virtual environment,
+  Pillow is installed with pip. LaTeX is never installed.
+- New options: `--setup` (check, then offer to install everything missing) and `--install ask|yes|no`.
+- Homebrew's folder is added to `PATH` for the run when it is not there, so tools installed with it are found.
+- Nothing is installed without a terminal, with `--install no`, or on Windows.
+
 ## v0.1.2 — 2026-11-13
 
 - The prompt for the student notes no longer contains a built-in author, course, date or title. The example title block

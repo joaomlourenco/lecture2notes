@@ -73,6 +73,20 @@ python3 lecture2notes.py --check
 
 Each run also checks the tools it needs. If a required one is missing, the run stops and prints how to install it. If an optional one is missing, the run continues and says what it is skipping (no PDF, alignment by words only, and so on).
 
+### Installing what is missing
+
+You do not have to install everything by hand. When a program is needed and missing, the script offers to install it, in a terminal, and only after you answer yes to the exact commands it shows. To get everything in one go, run:
+
+```bash
+python3 lecture2notes.py --setup
+```
+
+- **Homebrew first.** Programs are installed with [Homebrew](https://brew.sh) (`brew install ffmpeg`, `pandoc`, `poppler`, `tesseract`, `openai-whisper`, and Pillow for Homebrew's Python). If Homebrew itself is missing (macOS or Linux), the script offers to run its official installer, shows the command, and asks first, always, even with `--install yes`. It finds Homebrew even when your shell's `PATH` does not list it.
+- **Without Homebrew.** mlx-whisper goes into its own Python environment (`~/.venvs/whisper`, created with `python3 -m venv`; Apple Silicon only, elsewhere use `--engine openai`). Pillow is installed with `pip` (in the current virtual environment, or with `--user`).
+- **LaTeX is never installed by the script.** It is large and best chosen by you; see the table above. Without it the PDFs are simply not made (see `--latex`).
+- **Only when you can answer.** Without a terminal (a script, a scheduled job, a pipe), or with `--install no`, nothing is installed and you get the install instructions as before. `--install yes` skips the question per package. On Windows the script only prints the instructions.
+- **Passwords.** The script never uses `sudo` itself. Homebrew's installer asks for your password when it needs it.
+
 ### Hardware
 
 - **Disk**: the Whisper `turbo` model is about 1.6 GB, downloaded on first use to `~/.cache/huggingface/hub` (mlx) or `~/.cache/whisper` (openai). A full MacTeX install is about 5 GB (BasicTeX is much smaller). Temporary audio is about 115 MB per hour of recording and is deleted afterwards.
@@ -118,7 +132,9 @@ python3 lecture2notes.py slides.pptx lecture.mov --switch-penalty 0.3
 
 | Option | Meaning |
 |---|---|
-| `--check` | Check the external tools, print install instructions, and exit. |
+| `--check` | Check the external tools, print install instructions, and exit. Installs nothing. |
+| `--setup` | Check the external tools and offer to install the missing ones (not LaTeX), then show the result. See "Installing what is missing". |
+| `--install ask\|yes\|no` | What to do when a needed program is missing: `ask` (default) offers to install it, in a terminal; `yes` does not ask for each package (Homebrew itself is still asked); `no` never installs. |
 | `--separate` | Each recording is its own lecture with its own folder. On by default when you pass a folder. A `.pptx` (or else `.pdf`) with the same name as a recording is used for it if you gave no slides. |
 | `-o, --outdir DIR` | Output folder. With `--separate` or a folder, this is the parent of the per-lecture folders. |
 | `--name NAME` | Name used in titles and file names. |
@@ -324,7 +340,8 @@ is read). Its main parts, in file order:
 
 | Part | Functions | Notes |
 |---|---|---|
-| External tools | `probe_env`, `require`, `note_missing`, `asr_command`, `report_env` | The `INSTALL` table holds the install hint for every tool the script can ask for. A tool that is checked with `require` or `note_missing` must have an entry there. |
+| External tools | `probe_env`, `require`, `note_missing`, `asr_command`, `report_env`, `setup` | The `INSTALL` table holds the install hint for every tool the script can ask for. A tool that is checked with `require` or `note_missing` must have an entry there. |
+| Installing | `offer_install`, `install_commands`, `install_homebrew`, `ensure_brew_on_path` | `require` and `note_missing` call `offer_install` before giving up. `PACKAGE_OF` says which package provides a tool (LaTeX is left out on purpose); `install_commands` gives the commands. Nothing runs without a terminal and a "yes". |
 | Slides | `read_pptx`, `read_pdf`, `render_pdf_pages`, `read_decks` | Each slide is a dict (`n`, `k`, `deck`, `title`, `items`, `notes`, `shown`, `kind`, and `part` for a PPTX). |
 | Text matching | `tokens`, `build_scores`, `align`, `align_pinned`, `detect_language` | Pure functions. `STOP` is stored without accents, because `_token` removes the accents of a word before looking it up. |
 | Video | `read_slide_numbers`, `clean_numbers`, `to_global`, `detect_scenes`, `visual_slides` | The slide number is read by tesseract in a corner of the frame. |
