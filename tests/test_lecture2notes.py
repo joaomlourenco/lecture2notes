@@ -227,7 +227,7 @@ class AIChoice(unittest.TestCase):
         self.assertEqual(agy[:2], ["/x/agy", "-p"])
         self.assertIn("stream-json", agy)
         self.assertNotIn("--mode", agy)  # accept-edits would deny the shell commands in print mode
-        self.assertEqual(agy[agy.index("--add-dir") + 1], "/out")
+        self.assertEqual(agy[agy.index("--add-dir") + 1], str(out))  # a Path: \\out on Windows
         self.assertEqual(agy[-3:], ["--model", "m1", "--sandbox"])
         claude = m.ai_argv("claude", "/x/claude", self.args(notes_budget=5), out)
         self.assertEqual(claude[claude.index("--permission-mode") + 1], "acceptEdits")
