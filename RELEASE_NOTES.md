@@ -7,6 +7,11 @@
   `<name>.partK.reading-notes.md`, one complete, standalone document for each part, with figures named by part. The build
   script (`build-kit 2`) now builds every `*.reading-notes.md` of the folder; an older `build.sh` is replaced. A one-document
   version is used as the starting point and, when the parts are done, moved to `reading-notes/superseded/`.
+- **Fixed: a long author line ran into the margin of the PDF** of the student notes. LaTeX sets the author in a one-line
+  box; the kit's `boxes.lua` filter now puts it in a centred paragraph box as wide as the text. An older `boxes.lua` in
+  an existing `reading-notes/build/` is replaced when the script next prepares that folder (the old one is kept as
+  `boxes.lua.old`); to fix a folder at once, copy the new file and run `sh build/build.sh`.
+- **Fixed: `--student-notes` stopped when pandoc was missing**; it now writes the prompt and the kit and says what is missing.
 - **`--notes-only`**: write only the student notes, from the transcript of an earlier run, without transcribing, matching or
   rewriting anything else.
 

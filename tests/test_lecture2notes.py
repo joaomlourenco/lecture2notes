@@ -123,6 +123,17 @@ class NotesInParts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(m.ENV, {"pandoc": None}):
             self.assertFalse(m.make_reference_docx(Path(d) / "reference.docx"))  # no crash, no file
 
+    @unittest.skipUnless(shutil.which("pandoc"), "needs pandoc")
+    def test_a_long_author_line_is_wrapped_for_latex(self):
+        with tempfile.TemporaryDirectory() as d:
+            lua, md = Path(d) / "boxes.lua", Path(d) / "a.md"
+            lua.write_text(m.KIT_BOXES_LUA, encoding="utf-8")
+            md.write_text('---\ntitle: T\nauthor: "A long author line · with a separator, which would run into the margin"\n---\n\nText\n',
+                          encoding="utf-8")
+            r = subprocess.run(["pandoc", str(md), "--lua-filter", str(lua), "-t", "latex", "-s"], capture_output=True,
+                               text=True, encoding="utf-8")
+            self.assertIn("\\author{\\parbox[t]{0.92\\linewidth}{\\centering A long author line", r.stdout)
+
     def test_part_files(self):
         self.assertEqual(m.part_files("L", 1), ["L.reading-notes.md"])
         self.assertEqual(m.part_files("L", 2), ["L.part1.reading-notes.md", "L.part2.reading-notes.md"])

@@ -2401,7 +2401,8 @@ STUDENT_NOTES_REVISE_SLIDES = r"""- **Previous version of the notes**: `inputs/p
 """
 
 
-KIT_BOXES_LUA = r'''-- Pandoc filter for the reading notes.
+KIT_BOXES_LUA = r'''-- Pandoc filter for the reading notes. (build-kit 2)
+-- The author line is wrapped for LaTeX: it would otherwise run into the margin (see Meta below).
 -- Boxes are fenced divs with one of the classes below and an optional title:
 --   ::: {.keyidea title="The main idea"}
 --   ...
@@ -2458,6 +2459,28 @@ function Div(el)
       return el
     end
   end
+end
+
+-- LaTeX sets the author in a one-line box, so a long author line ("Programme · Institution · Lecturer, with guest ...") runs
+-- into the margin. Put it in a centred paragraph box as wide as the text, which breaks the line where it must.
+local function wrap_author(a)
+  local inlines = pandoc.utils.type(a) == "Inlines" and a or pandoc.Inlines({ pandoc.Str(pandoc.utils.stringify(a)) })
+  local out = pandoc.Inlines({ pandoc.RawInline("latex", "\\parbox[t]{0.92\\linewidth}{\\centering ") })
+  out:extend(inlines)
+  out:insert(pandoc.RawInline("latex", "}"))
+  return out
+end
+
+function Meta(meta)
+  if not (FORMAT:match("latex") and meta.author) then return nil end
+  if pandoc.utils.type(meta.author) == "List" then
+    local wrapped = {}
+    for i, a in ipairs(meta.author) do wrapped[i] = wrap_author(a) end
+    meta.author = pandoc.MetaList(wrapped)
+  else
+    meta.author = wrap_author(meta.author)
+  end
+  return meta
 end
 
 function Pandoc(doc)
@@ -2907,8 +2930,10 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
         notes_dir / "figures" / "style.py": KIT_STYLE_PY.replace("$figfont", sans_font if sans_font == "Avenir Next" else "DejaVu Sans"),
     }
     for path, text in kit.items():
-        old_build = path.name == "build.sh" and path.exists() and "build-kit 2" not in path.read_text(encoding="utf-8")
-        if not path.exists() or args.notes_fresh or old_build:  # an old build.sh builds one file only and ignores --latex: replace it
+        old_kit = path.name in ("build.sh", "boxes.lua") and path.exists() and "build-kit 2" not in path.read_text(encoding="utf-8")
+        if old_kit:  # an old build.sh builds one file only, an old boxes.lua lets a long author line run into the margin
+            shutil.copyfile(path, path.with_name(path.name + ".old"))
+        if not path.exists() or args.notes_fresh or old_kit:
             path.write_text(text, encoding="utf-8")
     (notes_dir / "build" / "build.sh").chmod(0o755)
     no_latex = notes_dir / "build" / "no-latex"
