@@ -1,5 +1,14 @@
 # lecture2notes
 
+[![tests](https://github.com/joaomlourenco/lecture2notes/actions/workflows/test.yml/badge.svg)](https://github.com/joaomlourenco/lecture2notes/actions/workflows/test.yml)
+[![version](https://img.shields.io/github/v/tag/joaomlourenco/lecture2notes?sort=semver&label=version)](RELEASE_NOTES.md)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
+[![platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#requirements)
+[![dependencies](https://img.shields.io/badge/dependencies-standard%20library%20only-brightgreen)](#requirements)
+[![license: MIT](https://img.shields.io/github/license/joaomlourenco/lecture2notes)](LICENSE)
+[![commits](https://img.shields.io/github/commit-activity/t/joaomlourenco/lecture2notes?label=commits)](https://github.com/joaomlourenco/lecture2notes/commits/main)
+[![last commit](https://img.shields.io/github/last-commit/joaomlourenco/lecture2notes)](https://github.com/joaomlourenco/lecture2notes/commits/main)
+
 Turn a recorded lecture (and, if you have them, its PowerPoint slides) into a **timestamped transcript** and **reading notes** organised slide by slide, in Markdown and PDF.
 
 ```bash
