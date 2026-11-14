@@ -1,5 +1,19 @@
 # Release notes
 
+## Unreleased
+
+- **The speech engine is chosen for you** (`--engine auto`, now the default): on a Mac, MacWhisper if the app and its
+  `mw` command-line tool are installed, else mlx-whisper on Apple Silicon, else openai-whisper; on Linux and Windows,
+  openai-whisper. `--engine macwhisper|mlx|openai` overrides. Before, the default was mlx everywhere, which failed
+  on Linux and Windows.
+- MacWhisper support: uses `mw transcribe` (JSON with Pro, else the free SRT), the model selected in the app or
+  `--model provider:name`. It cannot translate, so the translation to English falls back to mlx or openai-whisper.
+  Written from MacWhisper's documentation; not tried against the real app.
+- Windows and Linux: console output no longer fails on characters the console cannot show; Tesseract and pandoc are
+  found in their usual Windows install folders; the messages say `py` on Windows; `--setup` installs openai-whisper
+  with pipx or pip when Homebrew is not there. The deprecated `os.path.commonprefix` is no longer used.
+- A test suite (26 tests, standard library only) and a GitHub Actions workflow that runs it on macOS, Linux and Windows.
+
 ## v0.2 — 2026-11-13
 
 - The script now offers to install what is missing, instead of only printing instructions: when a needed program is

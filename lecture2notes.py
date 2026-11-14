@@ -114,6 +114,7 @@ SLIDE_EXT = {".pptx", ".pdf"}
 
 # ----------------------------------------------------------------------------------------------- external tools
 ENV: dict = {}  # tool -> path (or version for pillow), filled by probe_env()
+PY = "py" if sys.platform == "win32" else "python3"  # how the user starts Python, for the messages
 
 INSTALL = {  # tool -> (what it is for, {platform: how to install})
     "ffmpeg": ("extract the audio and look at the video",
@@ -125,10 +126,14 @@ INSTALL = {  # tool -> (what it is for, {platform: how to install})
                 {"darwin": "brew install openai-whisper      (or: pipx install openai-whisper)",
                  "linux": "pipx install openai-whisper      (or: python3 -m pip install -U openai-whisper)",
                  "win32": "pip install -U openai-whisper"}),
-    "mlx_whisper": ("transcribe the speech on Apple Silicon (mlx-whisper, the default engine)",
+    "mlx_whisper": ("transcribe the speech on Apple Silicon (mlx-whisper, the default engine on a Mac without MacWhisper)",
                     {"darwin": "python3 -m venv ~/.venvs/whisper && ~/.venvs/whisper/bin/pip install mlx-whisper      "
                                "(Apple Silicon only; elsewhere use --engine openai)",
                      "*": "mlx-whisper needs an Apple Silicon Mac: use --engine openai"}),
+    "macwhisper": ("transcribe the speech with the MacWhisper app (commercial), through its command-line tool `mw`",
+                   {"darwin": "install MacWhisper, then in it: Settings > Advanced > Command-Line Tool > Install "
+                              "(https://docs.macwhisper.com/article/57-macwhisper-command-line-tool)",
+                    "*": "MacWhisper exists only for the Mac: use --engine openai"}),
     "pdftotext": ("read slides given as PDF (part of poppler; pdftoppm, also in poppler, makes the slide pictures)",
                   {"darwin": "brew install poppler", "linux": "sudo apt install poppler-utils", "win32": "winget install oschwartz10612.Poppler"}),
     "pdfinfo": ("count the pages of slides given as PDF (part of poppler)",
@@ -164,8 +169,34 @@ MLX_REPOS = {  # openai-whisper model names -> mlx-community repositories on Hug
 MLX_VENV_BIN = Path.home() / ".venvs" / "whisper" / "bin" / "mlx_whisper"  # where mlx-whisper.sh installs it
 
 
+def find_tool(name: str) -> str | None:
+    """shutil.which and, on Windows, the usual install folders: the installers of tesseract and pandoc do not always put
+    their folder on PATH."""
+    found = shutil.which(name)
+    if found or sys.platform != "win32":
+        return found
+    folders = {"tesseract": ("Tesseract-OCR", "Programs/Tesseract-OCR"), "pandoc": ("Pandoc", "Programs/Pandoc")}
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        for sub in folders.get(name, ()):
+            cand = Path(os.environ.get(var) or "/nonexistent") / sub / f"{name}.exe"
+            if cand.is_file():
+                return str(cand)
+    return None
+
+
+def macwhisper_path() -> str | None:
+    """MacWhisper's command-line tool `mw`, when the app and the tool are both there (the app's folder is checked too: `mw`
+    is a common name). It is not run here: running it starts the app."""
+    if sys.platform != "darwin":
+        return None
+    mw = shutil.which("mw") or ("/usr/local/bin/mw" if Path("/usr/local/bin/mw").is_file() else None)
+    app = any((Path(d) / "MacWhisper.app").is_dir() for d in ("/Applications", str(Path.home() / "Applications")))
+    return mw if mw and app else None
+
+
 def probe_env() -> dict:
-    env = {t: shutil.which(t) for t in ("ffmpeg", "ffprobe", "whisper", "pandoc", "tesseract")}
+    env = {t: find_tool(t) for t in ("ffmpeg", "ffprobe", "whisper", "pandoc", "tesseract")}
+    env["macwhisper"] = macwhisper_path()
     env["pdftotext"], env["pdftoppm"], env["pdfinfo"] = shutil.which("pdftotext"), shutil.which("pdftoppm"), shutil.which("pdfinfo")
     env["mlx_whisper"] = shutil.which("mlx_whisper") or (str(MLX_VENV_BIN) if MLX_VENV_BIN.is_file() else None)
     env["latex"] = next((shutil.which(e) for e in ("xelatex", "lualatex", "pdflatex") if shutil.which(e)), None)
@@ -246,6 +277,11 @@ def ensure_brew_on_path() -> None:
 
 def install_commands(pkg: str, brew: str) -> list[list[str]] | None:
     """The commands that install a package, or None if this script cannot do it on this machine."""
+    if pkg == "openai-whisper" and sys.platform != "darwin" and not shutil.which("brew"):  # Linux: pipx or pip, if there
+        if shutil.which("pipx"):
+            return [["pipx", "install", "openai-whisper"]]
+        if sys.prefix != sys.base_prefix:
+            return [[sys.executable, "-m", "pip", "install", "openai-whisper"]]
     if pkg in ("ffmpeg", "poppler", "pandoc", "openai-whisper"):
         return [[brew, "install", pkg]]
     if pkg == "tesseract":
@@ -363,7 +399,31 @@ def tool(name: str) -> str:
 
 def asr_tool(args) -> str:
     """The speech recognition program of the chosen engine (a key of ENV and INSTALL)."""
-    return "mlx_whisper" if args.engine == "mlx" else "whisper"
+    return {"macwhisper": "macwhisper", "mlx": "mlx_whisper"}.get(args.engine, "whisper")
+
+
+def resolve_engine(args) -> None:
+    """--engine auto (the default): on a Mac, MacWhisper if it is installed with its command-line tool, else mlx-whisper
+    on Apple Silicon, else openai-whisper; on Linux and Windows, openai-whisper."""
+    if args.engine != "auto":
+        return
+    if sys.platform == "darwin" and ENV.get("macwhisper"):
+        args.engine = "macwhisper"
+    elif sys.platform == "darwin" and platform.machine() == "arm64":
+        args.engine = "mlx"
+        if any((Path(d) / "MacWhisper.app").is_dir() for d in ("/Applications", str(Path.home() / "Applications"))):
+            print("note: MacWhisper is installed but its command-line tool is not, so mlx-whisper is used. To use MacWhisper: "
+                  + install_hint("macwhisper"))
+    else:
+        args.engine = "openai"
+
+
+def model_key(args) -> str | None:
+    """The model as recorded in the caches. MacWhisper uses the model selected in the app unless --model gives an id
+    like provider:name; then there is nothing to compare."""
+    if args.engine == "macwhisper":
+        return args.model if ":" in args.model else None
+    return args.model
 
 
 def asr_model(args, model: str) -> str:
@@ -376,6 +436,8 @@ def asr_model(args, model: str) -> str:
 def model_cached(args, model: str) -> tuple[bool, Path]:
     """(is the model already downloaded, where it goes)."""
     m = asr_model(args, model)
+    if args.engine == "macwhisper":  # the models are managed in the app
+        return True, Path(".")
     if args.engine == "mlx":
         if Path(m).expanduser().is_dir():
             return True, Path(m).expanduser()
@@ -507,10 +569,12 @@ def report_env(args) -> int:
     chosen = asr_tool(args)
     rows = [("ffmpeg", True), ("ffprobe", True), ("mlx_whisper", chosen == "mlx_whisper"), ("whisper", chosen == "whisper"),
             ("pandoc", False), ("latex", False), ("tesseract", False), ("pillow", False)]
+    if sys.platform == "darwin" or chosen == "macwhisper":
+        rows.insert(2, ("macwhisper", chosen == "macwhisper"))
     for t, required in rows:
         have = ENV.get(t)
         state = "ok" if have else ("MISSING (required)" if required else "missing (optional)")
-        if t in ("mlx_whisper", "whisper"):
+        if t in ("macwhisper", "mlx_whisper", "whisper"):
             state += "  [engine]" if t == chosen else ""
         print(f"{t:<11} {state:<19} {have or ''}")
         if not have:
@@ -523,12 +587,15 @@ def report_env(args) -> int:
         if want and want not in langs:
             print(f"{'':<10} the language '{want}' for --language {args.language} is missing: {install_hint('tesseract')}")
     print(f"pdf files:  --latex {args.latex}" + (" (chosen)" if args.latex_chosen else f" (default: {'a LaTeX engine was found' if args.latex_found else 'no LaTeX engine found'})"))
-    cached, where = model_cached(args, args.model)
-    print(f"engine: {args.engine} ({chosen}); model '{args.model}' = {asr_model(args, args.model)}: "
-          + ("cached" if cached else f"not cached yet; downloaded on first use into {where}"))
+    if args.engine == "macwhisper":
+        print("engine: macwhisper; the model is the one selected in the MacWhisper app (--model provider:name uses another one)")
+    else:
+        cached, where = model_cached(args, args.model)
+        print(f"engine: {args.engine} ({chosen}); model '{args.model}' = {asr_model(args, args.model)}: "
+              + ("cached" if cached else f"not cached yet; downloaded on first use into {where}"))
     print("\nall required tools are there" if ok else "\nsome required tools are missing (see above)")
     if any(PACKAGE_OF.get(t) and not ENV.get(t) for t, _ in rows) and not args.setup:
-        print("to install what is missing (not LaTeX), run:  python3 lecture2notes.py --setup")
+        print(f"to install what is missing (not LaTeX), run:  {PY} lecture2notes.py --setup")
     return 0 if ok else 1
 
 
@@ -1466,6 +1533,63 @@ def stale_reason(json_path: Path, recording: Path, model: str | None, language: 
     return None
 
 
+SRT_TIME = re.compile(r"(\d+):(\d\d):(\d\d)[,.](\d{1,3})\s*-->\s*(\d+):(\d\d):(\d\d)[,.](\d{1,3})")
+
+
+def parse_srt(text: str) -> list[dict]:
+    """Segments {start, end, text} (seconds) from SRT (or WebVTT) text."""
+    secs = lambda h, m, s, ms: int(h) * 3600 + int(m) * 60 + int(s) + int(ms.ljust(3, "0")) / 1000.0
+    segs = []
+    for block in re.split(r"\n\s*\n", text.replace("\r\n", "\n").strip()):
+        lines = block.split("\n")
+        for k, ln in enumerate(lines):
+            m = SRT_TIME.search(ln)
+            if m:
+                body = " ".join(x.strip() for x in lines[k + 1:] if x.strip())
+                if body:
+                    segs.append({"start": secs(*m.groups()[:4]), "end": secs(*m.groups()[4:]), "text": body})
+                break
+    return segs
+
+
+def parse_mw_json(text: str, audio_seconds: float) -> list[dict]:
+    """Segments from the JSON of `mw transcribe --format json`: {"segments": [{"start", "end", "text"}]}, in milliseconds
+    according to MacWhisper's documentation. If the numbers are not larger than the audio is long, they are seconds."""
+    raw = json.loads(text).get("segments", [])
+    last = max((float(s["end"]) for s in raw), default=0.0)
+    scale = 1.0 if audio_seconds and last <= 1.5 * audio_seconds else 1000.0
+    return [{"start": float(s["start"]) / scale, "end": float(s["end"]) / scale, "text": s["text"].strip()}
+            for s in raw if s.get("text", "").strip()]
+
+
+def macwhisper_transcribe(wav: Path, out_json: Path, args) -> None:
+    """Transcribe `wav` with MacWhisper's `mw` and write a Whisper-style JSON ({"language", "segments"}) to out_json. JSON
+    output needs MacWhisper Pro; without it the free SRT output is used (same segments and times)."""
+    audio_seconds = wav.stat().st_size / 32000.0  # 16 kHz, mono, 16 bits
+    segs: list[dict] = []
+    for fmt in ("json", "srt"):
+        cmd = [tool("macwhisper"), "transcribe", str(wav), "--format", fmt, "--no-speakers"]
+        if args.language:
+            cmd += ["--language", args.language]
+        if ":" in args.model:  # a MacWhisper model id, provider:name; otherwise the model selected in the app
+            cmd += ["--model", args.model]
+        print(f"transcribing with MacWhisper (this takes a while): {show_command(cmd)}")
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+        if r.returncode == 0 and r.stdout.strip():
+            try:
+                segs = parse_mw_json(r.stdout, audio_seconds) if fmt == "json" else parse_srt(r.stdout)
+            except (ValueError, KeyError, TypeError):
+                segs = []
+        if segs:
+            break
+        if fmt == "json":
+            print("note: MacWhisper gave no JSON (that format needs MacWhisper Pro): asking for SRT, which is free")
+    if not segs:
+        sys.exit("error: MacWhisper (mw) did not give a transcription (see above: is a model downloaded in the app?)")
+    out_json.write_text(json.dumps({"text": " ".join(s["text"] for s in segs), "language": args.language,
+                                    "segments": [dict(s, id=i) for i, s in enumerate(segs)]}, ensure_ascii=False), encoding="utf-8")
+
+
 def transcribe(recording: Path, outdir: Path, args, stem: str, given_json: str | None = None) -> Path:
     """Whisper JSON of one recording (`stem` names the files in outdir, unique among the recordings)."""
     if given_json:
@@ -1474,7 +1598,7 @@ def transcribe(recording: Path, outdir: Path, args, stem: str, given_json: str |
         return Path(given_json)
     out_json = outdir / f"{stem}.json"
     if out_json.exists() and not args.force:
-        why = stale_reason(out_json, recording, args.model, args.language)
+        why = stale_reason(out_json, recording, model_key(args), args.language)
         if not why:
             print(f"using the existing transcription {out_json} (--force to redo it)")
             return out_json
@@ -1482,7 +1606,7 @@ def transcribe(recording: Path, outdir: Path, args, stem: str, given_json: str |
     # the same recording may have been transcribed alone before, into its own folder: reuse that
     alone = recording.parent / f"{recording.stem} notes" / f"{safe_stem(recording.stem, 'recording')}.json"
     if alone.exists() and alone.resolve() != out_json.resolve() and not args.force:
-        why = stale_reason(alone, recording, args.model, args.language)
+        why = stale_reason(alone, recording, model_key(args), args.language)
         if not why:
             print(f"using the existing transcription {alone} (--force to redo it)")
             shutil.copyfile(alone, out_json)
@@ -1494,10 +1618,15 @@ def transcribe(recording: Path, outdir: Path, args, stem: str, given_json: str |
     wav = outdir / f"{stem}.wav"
     print(f"extracting the audio of {recording.name} ...")
     subprocess.run([ffmpeg, "-y", "-loglevel", "error", "-i", str(recording), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav)], check=True)
-    cmd = asr_command(args, wav, outdir, args.model, args.language)
-    print(f"transcribing with {args.engine} whisper (this takes a while):", show_command(cmd))
     try:
-        subprocess.run(cmd, check=True)
+        if args.engine == "macwhisper":
+            if args.whisper_args:
+                print("note: --whisper-args, --keep-context and --silence-threshold are for Whisper itself: MacWhisper ignores them")
+            macwhisper_transcribe(wav, out_json, args)
+        else:
+            cmd = asr_command(args, wav, outdir, args.model, args.language)
+            print(f"transcribing with {args.engine} whisper (this takes a while):", show_command(cmd))
+            subprocess.run(cmd, check=True)
     finally:
         if not args.keep_audio:
             wav.unlink(missing_ok=True)
@@ -1507,14 +1636,31 @@ def transcribe(recording: Path, outdir: Path, args, stem: str, given_json: str |
         spoken = json.loads(out_json.read_text(encoding="utf-8")).get("language")
     except (OSError, ValueError):
         spoken = None
-    write_meta(out_json, {"source": source_fingerprint(recording), "model": args.model, "language": spoken, "engine": args.engine})
+    write_meta(out_json, {"source": source_fingerprint(recording), "model": model_key(args), "language": spoken, "engine": args.engine})
     return out_json
+
+
+def translation_args(args):
+    """The settings for the translation to English. MacWhisper cannot translate, so then mlx-whisper (Apple Silicon) or
+    openai-whisper does it, if installed. None if nothing can."""
+    if args.engine != "macwhisper":
+        return args
+    for engine, name in (("mlx", "mlx_whisper"), ("openai", "whisper")):
+        if ENV.get(name) and (engine != "mlx" or platform.machine() == "arm64"):
+            return argparse.Namespace(**{**vars(args), "engine": engine})
+    return None
+
+
+def translate_model_name(args) -> str:
+    """Whisper model for the translation: --translate-model, else medium (turbo is not trained to translate; and a
+    MacWhisper model id is no Whisper model name), else --model."""
+    return args.translate_model or ("medium" if args.engine == "macwhisper" or args.model in ("turbo", "large-v3-turbo") else args.model)
 
 
 def translate_recording(recording: Path, outdir: Path, args, stem: str, lang: str | None) -> list[dict] | None:
     """English translation of the speech (whisper --task translate), cached in <stem>.en-<model>.json; only for
     matching words. None if it did not come out in English."""
-    model = args.translate_model or ("medium" if args.model in ("turbo", "large-v3-turbo") else args.model)
+    model = translate_model_name(args)
     out_json = outdir / f"{stem}.en-{safe_stem(model, 'model')}.json"
     why = stale_reason(out_json, recording, None, None) if out_json.exists() and not args.force else None
     if why:
@@ -1522,6 +1668,13 @@ def translate_recording(recording: Path, outdir: Path, args, stem: str, lang: st
     if out_json.exists() and not args.force and not why:
         print(f"using the existing translation {out_json.name}")
     else:
+        targs = translation_args(args)
+        if targs is None:
+            print("warning: MacWhisper cannot translate, and neither mlx-whisper nor openai-whisper is installed, so the speech "
+                  f"cannot be matched to English slides by its words. Install one ({PY} lecture2notes.py --setup --engine openai, "
+                  "or mlx-whisper on Apple Silicon), or rely on the slide numbers in the video.")
+            return None
+        args = targs  # the settings of the engine that translates
         require(["ffmpeg", asr_tool(args)], "to translate the speech")
         if not model_cached(args, model)[0]:
             print(f"note: the whisper model '{asr_model(args, model)}' is downloaded on first use (turbo is not trained to "
@@ -1932,9 +2085,9 @@ def cross_language(segs, slides, recs, stems, outdir, args, speech_langs, slide_
         for s in segs:
             if s["rec"] == i:
                 s["align_text"] = " ".join(t["text"] for t in tsegs if t["start"] < s["end"] and t["end"] > s["start"])
-    model = args.translate_model or ("medium" if args.model in ("turbo", "large-v3-turbo") else args.model)
+    model = translate_model_name(args)
     REPORT["translation"] = (f"used for {', '.join(done)} (model {model})" if done
-                             else f"attempted but failed (the '{model}' output was not English)")
+                             else "attempted but failed (see the warning above)")
     scores = build_scores(segs, slides)
     return scores, align(scores, args.switch_penalty, args.allow_backward)
 
@@ -2779,6 +2932,15 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
 
 
 # ----------------------------------------------------------------------------------------------- main
+def _common_prefix(items: list[str]) -> str:
+    """The longest prefix shared by all the strings (os.path.commonprefix is deprecated)."""
+    first, last = min(items), max(items)
+    n = 0
+    while n < min(len(first), len(last)) and first[n] == last[n]:
+        n += 1
+    return first[:n]
+
+
 def lecture_label(recs: list[Path]) -> str:
     """A name made of the recordings' names (or the decks' names, without a recording), so that each set of recordings
     gets its own output folder."""
@@ -2786,10 +2948,10 @@ def lecture_label(recs: list[Path]) -> str:
     label = "+".join(stems)
     if len(stems) > 1:  # "Lecture (PART 1)" + "Lecture (PART 2)" -> "Lecture (PART 1+2)"
         short = min(len(x) for x in stems)
-        pre = len(os.path.commonprefix(stems))
+        pre = len(_common_prefix(stems))
         while pre and stems[0][pre - 1].isdigit():  # never split a number: aula01+02, not aula01+2
             pre -= 1
-        suf = min(len(os.path.commonprefix([x[::-1] for x in stems])), short - pre)
+        suf = min(len(_common_prefix([x[::-1] for x in stems])), short - pre)
         while suf and stems[0][len(stems[0]) - suf].isdigit():
             suf -= 1
         mids = [x[pre:len(x) - suf] for x in stems]
@@ -2897,6 +3059,11 @@ def resolve_latex(args) -> None:
 def main() -> int:
     if sys.version_info < (3, 9):
         sys.exit("error: python 3.9 or newer is needed")
+    for stream in (sys.stdout, sys.stderr):  # a console that cannot show a character (Windows) gets "?" instead of an error
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter,
                                  epilog=__doc__.split("\n\n", 1)[1])
     ap.add_argument("files", nargs="*", type=Path, help="recordings (MOV or anything ffmpeg reads, used in order), optionally .pptx or .pdf slides "
@@ -2912,11 +3079,15 @@ def main() -> int:
     ap.add_argument("-o", "--outdir", type=Path, help="output folder (default: '<recording> notes' next to the recording); "
                     "with --separate, the folder where the per-lecture folders go")
     ap.add_argument("--name", help="name used in titles and file names (default: the recordings')")
-    ap.add_argument("--engine", choices=("mlx", "openai"), default="mlx",
-                    help="speech recognition: mlx = mlx-whisper, fast on Apple Silicon (default); openai = the openai-whisper command line")
+    ap.add_argument("--engine", choices=("auto", "macwhisper", "mlx", "openai"), default="auto",
+                    help="speech recognition: auto (the default) = on a Mac, MacWhisper if it is installed with its command-line tool, "
+                         "else mlx-whisper on Apple Silicon, else openai-whisper; on Linux and Windows, openai-whisper. "
+                         "macwhisper = the MacWhisper app (commercial) through its `mw` tool; mlx = mlx-whisper, fast on Apple "
+                         "Silicon; openai = the openai-whisper command line")
     ap.add_argument("--mlx-command", help=f"the mlx_whisper program (default: mlx_whisper in PATH, else {MLX_VENV_BIN})")
     ap.add_argument("--model", default="turbo", help="whisper model: tiny, base, small, medium, large, turbo (default: turbo = "
-                    "large-v3-turbo); with --engine mlx also a Hugging Face repository or a local model folder")
+                    "large-v3-turbo); with --engine mlx also a Hugging Face repository or a local model folder; with MacWhisper the "
+                    "model selected in the app is used, unless this is one of its ids, provider:name (see `mw models list`)")
     ap.add_argument("--language", help="spoken language, e.g. en or pt (default: whisper detects it)")
     ap.add_argument("--whisper-args", help="extra arguments for the whisper program of the engine, as one quoted string "
                     "(with mlx, given as options of mlx_whisper.transcribe, e.g. \"--initial-prompt 'Lecture on algorithms'\")")
@@ -2982,6 +3153,9 @@ def main() -> int:
     ensure_brew_on_path()
     ENV.update(probe_env())
     resolve_latex(args)
+    if args.mlx_command and args.engine == "auto":
+        args.engine = "mlx"  # naming the mlx program is choosing mlx
+    resolve_engine(args)
     if args.mlx_command:
         exe = shutil.which(args.mlx_command) or (args.mlx_command if Path(args.mlx_command).expanduser().is_file() else None)
         if not exe:

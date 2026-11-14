@@ -14,7 +14,7 @@ A recorded lecture is hard to revise from: you can't skim a video or search it. 
 
 ## Objectives
 
-- **Transcribe** the lecture locally with Whisper: [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper) on Apple Silicon (the default, several times faster) or [OpenAI Whisper](https://github.com/openai/whisper). Nothing is sent to an online service.
+- **Transcribe** the lecture locally, with the engine that suits your computer (`--engine auto`, the default): the [MacWhisper](https://docs.macwhisper.com/) app on a Mac that has it, else [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper) on Apple Silicon (several times faster than the CPU), else [OpenAI Whisper](https://github.com/openai/whisper) (always on Linux and Windows). Nothing is sent to an online service.
 - **Assign the speech to slides**, using the slide number shown in the video when it can be read and the words otherwise.
 - **Work without slides too**: find the distinct screens in the video, save a picture of each, and read its text with OCR. If the video doesn't help (audio only, or a camera pointed at the lecturer), cut the speech into parts of a few minutes.
 - **Handle real course material**: several decks, a lecture split across several recordings, going back to earlier slides, and Portuguese or English speech.
@@ -52,8 +52,9 @@ The folder name comes from the recording(s), so several lectures in the same fol
 |---|---|---|---|
 | Python 3.9+ | running the script (standard library only) | `brew install python` | `sudo apt install python3` |
 | ffmpeg (with ffprobe) | extracting audio, looking at the video | `brew install ffmpeg` | `sudo apt install ffmpeg` |
-| mlx-whisper (`mlx_whisper`) | transcription, default engine (Apple Silicon only) | `python3 -m venv ~/.venvs/whisper && ~/.venvs/whisper/bin/pip install mlx-whisper` | — (use `--engine openai`) |
-| OpenAI Whisper (`whisper` CLI) *(alternative)* | transcription with `--engine openai` | `brew install openai-whisper` or `pipx install openai-whisper` | `pipx install openai-whisper` |
+| MacWhisper (`mw` tool) *(commercial, Mac only)* | transcription, the default engine when it is installed | install the app, then Settings › Advanced › Command-Line Tool › Install | — |
+| mlx-whisper (`mlx_whisper`) | transcription, the default engine on Apple Silicon without MacWhisper | `python3 -m venv ~/.venvs/whisper && ~/.venvs/whisper/bin/pip install mlx-whisper` | — (use `--engine openai`) |
+| OpenAI Whisper (`whisper` CLI) | transcription: the default on Linux, Windows and Intel Macs | `brew install openai-whisper` or `pipx install openai-whisper` | `pipx install openai-whisper` (Windows: `pip install -U openai-whisper`) |
 | pandoc *(optional)* | PDF output | `brew install pandoc` | `sudo apt install pandoc` |
 | LaTeX: xelatex, lualatex or pdflatex *(optional)* | PDF output | `brew install --cask mactex-no-gui` | `sudo apt install texlive-xetex texlive-fonts-recommended texlive-latex-extra` |
 | tesseract *(optional)* | reading slide numbers / text on screen | `brew install tesseract tesseract-lang` | `sudo apt install tesseract-ocr tesseract-ocr-por` |
@@ -62,6 +63,27 @@ The folder name comes from the recording(s), so several lectures in the same fol
 Reading a PPTX needs nothing extra: the file is a zip of XML and the script reads it directly. Reading slides given as **PDF** needs poppler (`pdftotext` and `pdfinfo` to read them, `pdftoppm` for the slide pictures in the notes): `brew install poppler` on macOS, `sudo apt install poppler-utils` on Debian/Ubuntu. They all come in the same package.
 
 > **Homebrew Python and Pillow.** Homebrew upgrades `python3` to new versions (3.14 → 3.15 …), and each version has its own packages. After an upgrade, Pillow may be missing for the new `python3`, and the slide numbers in the video are then silently not read. `--check` shows it; `brew install pillow` fixes it.
+
+**Which speech engine.** You need only one. With `--engine auto` (the default) the script picks:
+
+| Computer | Engine used |
+|---|---|
+| Mac with MacWhisper and its `mw` tool | MacWhisper |
+| Apple Silicon Mac without it | mlx-whisper |
+| Intel Mac, Linux, Windows | OpenAI Whisper |
+
+Name an engine with `--engine macwhisper`, `mlx` or `openai` to override. `--check` shows which one is used. Notes on MacWhisper, which is a commercial app:
+- It is used through its official command-line tool, `mw`, which you install from the app (Settings › Advanced › Command-Line Tool). The script uses it only when both the app and the tool are found, and tells you if the app is there but the tool is not.
+- It transcribes with the model selected in the app. To use another, give `--model provider:name` (see `mw models list`). A model must be downloaded in the app first.
+- The JSON output of `mw` needs MacWhisper Pro. Without Pro the script asks for SRT, which is free, and gets the same segments and times.
+- Whisper-only options (`--whisper-args`, `--keep-context`, `--silence-threshold`) do not apply to it, and it cannot translate. For the English translation used with English slides, the script then falls back to mlx-whisper or OpenAI Whisper if one is installed.
+
+**Linux and Windows.** The script is plain Python and works on macOS, Linux and Windows, with these differences:
+- Use OpenAI Whisper (`--engine openai` is chosen for you). On Windows start Python with `py` or `python` instead of `python3`.
+- Install the programs with your package manager (`--check` prints the commands; on Windows, `winget`). The install offer of `--setup` runs on macOS and Linux and only prints instructions on Windows.
+- On Windows the script also looks for Tesseract and pandoc in their usual install folders, because their installers do not always add them to `PATH`.
+- `--student-notes` needs a shell that runs `sh` for the build kit: Git Bash or WSL on Windows.
+- GitHub Actions runs the tests on all three systems for every push (see "For developers").
 
 **PDF files and LaTeX.** The PDFs are made by pandoc through a LaTeX engine. The script looks for xelatex, lualatex or pdflatex (or the one named with `--pdf-engine`) on every run: if one is found, `--latex yes` is the default, and if not, `--latex no`, with a note saying how to install LaTeX. With `--latex no` no PDF is made: you get the Markdown files, and with `--student-notes` the DOCX but no PDF. Give `--latex yes` or `--latex no` to override the choice. (`--no-pdf` still works and means the same as `--latex no` for the transcript and the notes.)
 
@@ -139,7 +161,7 @@ python3 lecture2notes.py slides.pptx lecture.mov --switch-penalty 0.3
 | `-o, --outdir DIR` | Output folder. With `--separate` or a folder, this is the parent of the per-lecture folders. |
 | `--name NAME` | Name used in titles and file names. |
 | `--language en\|pt\|…` | Spoken language (default: Whisper detects it). Also picks the tesseract OCR language. |
-| `--engine mlx\|openai` | Speech recognition: `mlx` = mlx-whisper, fast on Apple Silicon (default); `openai` = the openai-whisper command line. |
+| `--engine auto\|macwhisper\|mlx\|openai` | Speech recognition. `auto` (default): MacWhisper on a Mac that has it with its `mw` tool, else mlx-whisper on Apple Silicon, else openai-whisper (always on Linux and Windows). `macwhisper` = the MacWhisper app; `mlx` = mlx-whisper; `openai` = the openai-whisper command line. See "Which speech engine". |
 | `--mlx-command PATH` | The `mlx_whisper` program (default: `mlx_whisper` in PATH, else `~/.venvs/whisper/bin/mlx_whisper`). |
 | `--model NAME` | Whisper model (default `turbo`). Others: `tiny`, `base`, `small`, `medium`, `large`. With mlx they map to the `mlx-community` models on Hugging Face (e.g. `turbo` → `mlx-community/whisper-large-v3-turbo`); a repository name or a local model folder also works. |
 | `--whisper-args "..."` | Extra arguments for the engine's whisper program, for example `"--initial-prompt '...'"`, or `"--device cuda --fp16 True"` with openai. |
@@ -271,7 +293,7 @@ tighten the allow-list, edit the `tools` list in `student_notes()` (for example,
 
 ## How it works
 
-1. **Transcription.** ffmpeg extracts the audio of each recording (16 kHz mono) and Whisper transcribes it into timed segments: mlx-whisper by default, or openai-whisper with `--engine openai`. Both write the same JSON, so a transcript made with one engine is reused by the other. Long recordings are protected against Whisper's *repetition loops* (the same phrase transcribed hundreds of times while the real speech is lost): a window that looks repetitive is decoded again at a higher temperature, the previous text is not used as context, and suspected hallucinations over silences are skipped. mlx-whisper is called through its Python function for this, because its command line never retries. Repeated segments left in a saved transcription are removed when it is loaded, with a warning to transcribe again with `--force` when much was lost.
+1. **Transcription.** ffmpeg extracts the audio of each recording (16 kHz mono) and the speech engine transcribes it into timed segments (MacWhisper, mlx-whisper or openai-whisper, see "Which speech engine"). All of them end in the same JSON, so a transcript made with one engine is reused by the others. Long recordings are protected against Whisper's *repetition loops* (the same phrase transcribed hundreds of times while the real speech is lost): a window that looks repetitive is decoded again at a higher temperature, the previous text is not used as context, and suspected hallucinations over silences are skipped. mlx-whisper is called through its Python function for this, because its command line never retries. Repeated segments left in a saved transcription are removed when it is loaded, with a warning to transcribe again with `--force` when much was lost.
 2. **Slides.** A PPTX is read directly: titles, text, tables, and speaker notes, in slide order. A PDF export is read page by page with `pdftotext` (the first line of a page is its title; footers repeated on every page are dropped; lines wrapped on the slide are rejoined), and each page is also saved as a picture for the notes. A PDF has no speaker notes, so prefer the PPTX when you have both; given the same deck in both formats, the script uses the PPTX.
 3. **Matching speech to slides.**
    - *From the video.* First the script finds where the slide number is (bottom right, bottom left or bottom centre) by trying each spot on 30 frames. Then, once per second, that number is read with tesseract; small videos are enlarged more, so 7-pixel digits still read correctly. That shows which slide is on screen at every moment, including when you go back. With several decks, the speech decides between slides that share a number. Short misreadings are removed, and gaps are filled from the neighbouring readings.
@@ -351,8 +373,20 @@ is read). Its main parts, in file order:
 | Caches | `source_fingerprint`, `stale_reason`, `write_meta` | A cache is reused only if the recording it was made from (its size) and the model and language still match. |
 
 `align`, `align_pinned`, `clean_numbers`, `to_global`, `drop_repetitions`, `detect_language`, `key_sentences`,
-`lecture_label`, `tex_escape`, `fill_template` and `stale_reason` take and return plain data, so they are easy to test without any recording. There is
-no test suite yet; those are the place to start. Useful checks after a change:
+`lecture_label`, `tex_escape`, `fill_template`, `stale_reason`, `parse_srt` and `parse_mw_json` take and return plain data, so they are easy to test without any recording.
+
+**Tests.** `tests/test_lecture2notes.py` uses only the standard library (26 tests: the pure functions, the choice of
+engine by platform, the MacWhisper integration with a fake `mw`, the install offer with a fake terminal and brew, the
+command line, and a smoke test that makes a short video, gives the script a fake Whisper transcription and checks the
+files written). Run them from the repository folder:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+The smoke test needs ffmpeg and is skipped without it. Nothing needs Whisper, LaTeX or the network, and no program is
+really installed. `.github/workflows/test.yml` runs the tests on macOS, Linux and Windows (Python 3.9 and 3.13) for
+every push and pull request. Quick checks while editing:
 
 ```bash
 python3 -B -c "import ast; ast.parse(open('lecture2notes.py').read())"   # it parses
@@ -369,7 +403,7 @@ separate software with their own licenses.
 
 ## Credits
 
-- Transcription: [OpenAI Whisper](https://github.com/openai/whisper) (MIT License) and [mlx-whisper](https://github.com/ml-explore/mlx-examples) by Apple's MLX team (MIT License).
+- Transcription: [OpenAI Whisper](https://github.com/openai/whisper) (MIT License), [mlx-whisper](https://github.com/ml-explore/mlx-examples) by Apple's MLX team (MIT License), and, if you have it, the commercial app [MacWhisper](https://docs.macwhisper.com/) through its command-line tool (not affiliated with this project).
 - Audio and video: [FFmpeg](https://ffmpeg.org/).
 - OCR: [Tesseract](https://github.com/tesseract-ocr/tesseract) (Apache 2.0) and [Pillow](https://python-pillow.org/).
 - PDF: [pandoc](https://pandoc.org/) and TeX Live / MacTeX.
