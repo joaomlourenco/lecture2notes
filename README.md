@@ -385,7 +385,7 @@ python3 -m unittest discover -s tests -v
 ```
 
 The smoke test needs ffmpeg and is skipped without it. Nothing needs Whisper, LaTeX or the network, and no program is
-really installed. `.github/workflows/test.yml` runs the tests on macOS, Linux and Windows (Python 3.9 and 3.13) for
+really installed. `.github/workflows/test.yml` runs the tests on macOS, Linux and Windows (Python 3.9 where a build exists, and 3.13) for
 every push and pull request. Quick checks while editing:
 
 ```bash
