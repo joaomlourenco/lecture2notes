@@ -2817,7 +2817,8 @@ def parts_prompt(files: list[str], points: list[str] | None, revising: bool) -> 
            f"Find the {n} natural parts of the lecture in the transcript: a change of speaker, a break, a change of activity or "
            "of subject. Say in each part's \"How to use these notes\" where it begins and ends in the recording.")
     prev = (" The previous version (see Inputs) covers the whole lecture in one document: split its content between the parts, "
-            "and write `CHANGES.md` saying how." if revising else "")
+            "and write `CHANGES.md` saying how. Do not delete or move the previous version's files (the `.md`, `.pdf` and `.docx` "
+            "of the one-document notes): the script puts them away when you are done." if revising else "")
     return (f"\n## Separate notes for each part of the lecture\n\n"
             f"The user wants **{n} separate sets of notes, one for each part of the lecture, not one document**. This section "
             f"overrides the Output and Structure sections above wherever they differ.\n\n"

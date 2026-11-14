@@ -130,7 +130,8 @@ class NotesInParts(unittest.TestCase):
     def test_parts_prompt(self):
         files = m.part_files("L", 2)
         text = m.parts_prompt(files, ["02:27"], revising=True)
-        for needle in ("2 separate sets", "L.part1.reading-notes.md", "L.part2.reading-notes.md", "02:27", "fig-p1", "CHANGES.md"):
+        for needle in ("2 separate sets", "L.part1.reading-notes.md", "L.part2.reading-notes.md", "02:27", "fig-p1", "CHANGES.md",
+                       "Do not delete or move the previous version"):
             self.assertIn(needle, text)
         free = m.parts_prompt(files, None, revising=False)
         self.assertIn("Find the 2 natural parts", free)
