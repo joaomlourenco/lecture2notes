@@ -246,6 +246,24 @@ keep participants anonymous; leave out unverified anecdotes; and never reveal an
 Claude revises them against the new transcript instead of starting over, and writes `CHANGES.md`. `--notes-fresh`
 starts from scratch. The kit files are kept between runs, so your own changes to them survive.
 
+**One set of notes per part.** A long recording often holds distinct parts (a lecturer and two guest speakers, a lecture followed by a workshop). With `--notes-parts` Claude writes **one complete set of notes for each part**, instead of one big document:
+
+```bash
+# Claude finds the two parts in the transcript
+python3 lecture2notes.py lecture.mov --student-notes --notes-parts 2
+
+# or you say where the later parts begin (times as in the transcript): two parts, cut at 02:27
+python3 lecture2notes.py lecture.mov --student-notes --notes-parts 02:27
+```
+
+You get `<name>.part1.reading-notes.md` / `.pdf` / `.docx`, `<name>.part2...`, and so on. Each part stands alone, with its own title, key messages, chapters, review questions and glossary, covers only its own stretch of the recording without repeating the others, and has figures named `fig-p1-…`, `fig-p2-…` in the shared `figures/` folder. `sh build/build.sh` builds all the parts in one go. If a one-document version exists, Claude uses it as the starting point (`CHANGES.md` says how it was split) and, when the parts are done, it is moved to `reading-notes/superseded/`, not deleted.
+
+**Only the notes again.** `--notes-only` writes the student notes from the transcript of an earlier run in the same output folder, and does nothing else: no transcription, no matching, no new transcript or PDF. Use it to try `--notes-parts` or a new prompt on a lecture that is already processed:
+
+```bash
+python3 lecture2notes.py lecture.mov --notes-only --notes-parts 2
+```
+
 **Without a recording.** When the recording of a lecture failed, give the slides alone (and the readings with
 `--notes-extra`). There is nothing to transcribe or align, so the script goes straight to the student notes
 (`--student-notes` is implied), in `"<deck> notes"/reading-notes/`. Claude gets a variant of the prompt: the slides
@@ -273,7 +291,7 @@ lecturer from the slides, or from `--notes-context`, and leaves the line out if 
 about a person or a course is built into the script.
 
 **Options:** `--notes-language` (default English), `--notes-context`, `--notes-author` (the author line),
-`--notes-course` (PDF running header),
+`--notes-course` (PDF running header), `--notes-parts N|TIMES` (one set of notes per part), `--notes-only`,
 `--notes-extra FILE` (repeatable), `--notes-prompt FILE`, `--notes-model`, `--notes-budget USD` (API accounts),
 `--notes-fresh`, `--claude-command`.
 
@@ -384,7 +402,7 @@ is read). Its main parts, in file order:
 `align`, `align_pinned`, `clean_numbers`, `to_global`, `drop_repetitions`, `detect_language`, `key_sentences`,
 `lecture_label`, `tex_escape`, `fill_template`, `stale_reason`, `parse_srt` and `parse_mw_json` take and return plain data, so they are easy to test without any recording.
 
-**Tests.** `tests/test_lecture2notes.py` uses only the standard library (26 tests: the pure functions, the choice of
+**Tests.** `tests/test_lecture2notes.py` uses only the standard library (31 tests: the pure functions, the notes in parts and the kit's build script, the choice of
 engine by platform, the MacWhisper integration with a fake `mw`, the install offer with a fake terminal and brew, the
 command line, and a smoke test that makes a short video, gives the script a fake Whisper transcription and checks the
 files written). Run them from the repository folder:

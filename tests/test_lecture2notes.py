@@ -107,6 +107,57 @@ class PureFunctions(unittest.TestCase):
             self.assertIn("not the file", m.stale_reason(js, rec, "turbo", None))
 
 
+class NotesInParts(unittest.TestCase):
+    def test_parse_parts(self):
+        self.assertEqual(m.parse_parts(None), (1, None))
+        self.assertEqual(m.parse_parts("1"), (1, None))
+        self.assertEqual(m.parse_parts("3"), (3, None))
+        self.assertEqual(m.parse_parts("02:27"), (2, ["02:27"]))
+        self.assertEqual(m.parse_parts("01:00, 02:30:15"), (3, ["01:00", "02:30:15"]))
+        self.assertEqual(m.parse_parts("P2 00:10:00"), (2, ["P2 00:10:00"]))
+        for bad in ("abc", "0", "2:7", "01:00,x"):
+            with self.assertRaises(ValueError, msg=bad):
+                m.parse_parts(bad)
+
+    def test_part_files(self):
+        self.assertEqual(m.part_files("L", 1), ["L.reading-notes.md"])
+        self.assertEqual(m.part_files("L", 2), ["L.part1.reading-notes.md", "L.part2.reading-notes.md"])
+
+    def test_parts_prompt(self):
+        files = m.part_files("L", 2)
+        text = m.parts_prompt(files, ["02:27"], revising=True)
+        for needle in ("2 separate sets", "L.part1.reading-notes.md", "L.part2.reading-notes.md", "02:27", "fig-p1", "CHANGES.md"):
+            self.assertIn(needle, text)
+        free = m.parts_prompt(files, None, revising=False)
+        self.assertIn("Find the 2 natural parts", free)
+        self.assertNotIn("CHANGES.md", free)
+
+    @unittest.skipIf(sys.platform == "win32", "runs the kit's sh script")
+    def test_build_script_builds_every_notes_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "build").mkdir()
+            (d / "build" / "build.sh").write_text(m.KIT_BUILD_SH)
+            (d / "bin").mkdir()
+            fake = d / "bin" / "pandoc"  # writes an empty file where -o says
+            fake.write_text('#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ "$1" = "-o" ]; then shift; : > "$1"; fi; shift; done\n')
+            (d / "bin" / "xelatex").write_text("#!/bin/sh\n")
+            for f in (fake, d / "bin" / "xelatex"):
+                f.chmod(0o755)
+            for name in ("A.part1.reading-notes.md", "A.part2.reading-notes.md"):
+                (d / name).write_text("# x\n")
+            env = {"PATH": f"{d / 'bin'}:/usr/bin:/bin"}
+            subprocess.run(["sh", str(d / "build" / "build.sh")], env=env, check=True, capture_output=True)
+            self.assertEqual(sorted(p.name for p in d.glob("*.pdf")), ["A.part1.reading-notes.pdf", "A.part2.reading-notes.pdf"])
+            self.assertEqual(len(list(d.glob("*.docx"))), 2)
+            for p in list(d.glob("*.pdf")) + list(d.glob("*.docx")):
+                p.unlink()
+            (d / "build" / "no-latex").write_text("x")  # --latex no: the DOCX only
+            subprocess.run(["sh", str(d / "build" / "build.sh")], env=env, check=True, capture_output=True)
+            self.assertEqual(len(list(d.glob("*.pdf"))), 0)
+            self.assertEqual(len(list(d.glob("*.docx"))), 2)
+
+
 class EngineChoice(unittest.TestCase):
     def resolve(self, platform, machine="arm64", macwhisper=None, engine="auto"):
         args = argparse.Namespace(engine=engine)
@@ -281,6 +332,44 @@ class SmokeTest(unittest.TestCase):
             self.assertIn("merge sort", notes)
             self.assertTrue((d / "out" / "v.transcript.md").exists())
             self.assertFalse(list((d / "out").glob("*.pdf")))  # --latex no: no PDF
+
+
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs ffmpeg")
+class NotesPartsEndToEnd(unittest.TestCase):
+    """--notes-only and --notes-parts: the prompt and the folder are prepared (Claude Code itself is not run)."""
+
+    def run_script(self, *args):
+        return subprocess.run([sys.executable, "-B", str(SCRIPT), *args, "--install", "no", "--claude-command", "no-such-claude"],
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
+
+    def test_parts_from_an_earlier_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=320x180:d=6:r=5", str(d / "v.mp4")], check=True)
+            (d / "w.json").write_text(json.dumps({"language": "en", "segments": [
+                {"start": 0, "end": 3, "text": " Hello and welcome to this lecture about algorithms and sorting."}]}), encoding="utf-8")
+            out = d / "out"
+            # without an earlier run there is nothing to use
+            r = self.run_script(str(d / "v.mp4"), "-o", str(out), "--notes-only")
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("does not exist", r.stdout + r.stderr)
+            # the earlier run, then notes in two parts from it, replacing a one-document version
+            r = self.run_script(str(d / "v.mp4"), "--whisper-json", str(d / "w.json"), "-o", str(out), "--video-sync", "off", "--latex", "no")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            notes = out / "reading-notes"
+            notes.mkdir()
+            (notes / "v.reading-notes.md").write_text("# The old single document\n", encoding="utf-8")
+            r = self.run_script(str(d / "v.mp4"), "-o", str(out), "--notes-only", "--notes-parts", "00:03")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            prompt = (notes / "PROMPT.md").read_text(encoding="utf-8")
+            self.assertIn("2 separate sets of notes", prompt)
+            self.assertIn("v.part1.reading-notes.md", prompt)
+            self.assertIn("v.part2.reading-notes.md", prompt)
+            self.assertIn("00:03", prompt)
+            self.assertIn("previous-part", prompt)  # the revise text for parts
+            self.assertEqual((notes / "inputs" / "previous-notes.md").read_text(encoding="utf-8"), "# The old single document\n")
+            self.assertIn("build-kit 2", (notes / "build" / "build.sh").read_text(encoding="utf-8"))
+            self.assertFalse((out / "v.notes.md").stat().st_mtime > (notes / "PROMPT.md").stat().st_mtime)  # nothing was rewritten
 
 
 if __name__ == "__main__":

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **One set of student notes per part of a lecture**: `--notes-parts N` (Claude finds N parts in the transcript) or
+  `--notes-parts 02:27` / `01:00,02:30` (the times where the later parts begin). Claude writes
+  `<name>.partK.reading-notes.md`, one complete, standalone document for each part, with figures named by part. The build
+  script (`build-kit 2`) now builds every `*.reading-notes.md` of the folder; an older `build.sh` is replaced. A one-document
+  version is used as the starting point and, when the parts are done, moved to `reading-notes/superseded/`.
+- **`--notes-only`**: write only the student notes, from the transcript of an earlier run, without transcribing, matching or
+  rewriting anything else.
+
 - **The speech engine is chosen for you** (`--engine auto`, now the default): on a Mac, MacWhisper if the app and its
   `mw` command-line tool are installed, else mlx-whisper on Apple Silicon, else openai-whisper; on Linux and Windows,
   openai-whisper. `--engine macwhisper|mlx|openai` overrides. Before, the default was mlx everywhere, which failed

@@ -1847,6 +1847,12 @@ def run_lecture(decks: list[Path], recs: list[Path], outdir: Path, name: str, ar
     if len(set(stems)) != len(stems):  # same file name in different folders
         stems = [f"{i + 1:02d}-{st}" for i, st in enumerate(stems)]
     fstem = safe_stem(name, "lecture")
+    if args.notes_only:  # the transcript of an earlier run is the input: nothing else is redone
+        tmd = outdir / f"{fstem}.transcript.md"
+        if not tmd.exists():
+            sys.exit(f"error: --notes-only needs the transcript of an earlier run, and {tmd} does not exist: run once without it")
+        print(f"--notes-only: using the transcript of an earlier run, {tmd.name}")
+        return student_notes(decks, read_decks(decks) if decks else [], recs, outdir, fstem, name, tmd, args)
     if not args.whisper_json:
         todo = [r for r, st in zip(recs, stems) if args.force or not (outdir / f"{st}.json").exists()
                 and not (r.parent / f"{r.stem} notes" / f"{safe_stem(r.stem, 'recording')}.json").exists()]
@@ -2235,6 +2241,13 @@ End with a short report: the files written, the quality of the transcription and
 verify, and any choices the lecturer should review.
 """
 
+STUDENT_NOTES_REVISE_PARTS = r"""- **Previous version of the notes**: `inputs/previous-notes.md` (one document for the whole lecture) or
+  `inputs/previous-part*.md` (one per part), written earlier. Use it as the starting point for the parts: take over what
+  holds up (text, structure, style, and the figures in `figures/`, renamed for the part where they are used) into the part
+  it belongs to, check every section against the transcript, correct what the transcript contradicts, and remove what it
+  does not support.
+"""
+
 STUDENT_NOTES_REVISE = r"""- **Previous version of the notes**: `inputs/previous-notes.md`, written from an earlier, worse transcription. Use it
   as the starting point: keep its structure, style and figures (in `figures/`) where they hold up, check every
   section against the new transcript, correct what the transcript contradicts, add what it reveals (especially
@@ -2564,18 +2577,23 @@ number-sections: true
 '''
 
 KIT_BUILD_SH = r'''#!/bin/sh
-# Build the reading notes as DOCX and, when LaTeX is available, as PDF (via LaTeX). Needs pandoc 3 and, for the PDF, xelatex.
+# build-kit 2. Builds every *.reading-notes.md of this folder (one, or one per part of the lecture) as DOCX and, when
+# LaTeX is available, as PDF (via LaTeX). Needs pandoc 3 and, for the PDF, xelatex.
 cd "$(dirname "$0")/.." || exit 1
-SRC=$notes_file
+PDF=yes
 if [ -e build/no-latex ]; then
-  echo "PDF skipped: build/no-latex exists (lecture2notes.py makes it with --latex no; delete it to make the PDF)"
+  echo "PDF skipped: build/no-latex exists (lecture2notes.py makes it with --latex no; delete it to make the PDF)"; PDF=no
 elif ! command -v xelatex >/dev/null 2>&1; then
-  echo "PDF skipped: xelatex not found"
-else
-  pandoc --defaults build/pdf.yaml "$SRC" -o "${SRC%.md}.pdf" && echo "wrote ${SRC%.md}.pdf"
+  echo "PDF skipped: xelatex not found"; PDF=no
 fi
-pandoc --defaults build/docx.yaml "$SRC" -o "${SRC%.md}.docx" && echo "wrote ${SRC%.md}.docx"
-# LaTeX source, to edit further:  pandoc --defaults build/pdf.yaml -t latex -s "$SRC" -o "${SRC%.md}.tex"
+for SRC in *.reading-notes.md; do
+  [ -e "$SRC" ] || continue
+  if [ "$PDF" = yes ]; then
+    pandoc --defaults build/pdf.yaml "$SRC" -o "${SRC%.md}.pdf" && echo "wrote ${SRC%.md}.pdf"
+  fi
+  pandoc --defaults build/docx.yaml "$SRC" -o "${SRC%.md}.docx" && echo "wrote ${SRC%.md}.docx"
+done
+# LaTeX source of one file, to edit further:  pandoc --defaults build/pdf.yaml -t latex -s FILE.reading-notes.md -o FILE.tex
 '''
 
 KIT_STYLE_PY = r'''"""Shared look of the figures of the reading notes. In make_figures.py:
@@ -2765,6 +2783,58 @@ def fill_template(template: str, values: dict[str, str]) -> str:
     return re.sub(rf"\$({names})\b", lambda m: values[m.group(1)], template)
 
 
+PART_TIME = re.compile(r"(?:P\d+ )?\d+:\d\d(?::\d\d)?")  # 02:27, 01:05:30, or P2 00:10:00 for the 2nd of several recordings
+
+
+def parse_parts(spec: str | None) -> tuple[int, list[str] | None]:
+    """--notes-parts: a number N (Claude finds N parts) or the times where the parts after the first begin, e.g. "02:27" (two
+    parts) or "01:00,02:30" (three). Returns (number of parts, the times or None). Raises ValueError for anything else."""
+    if not spec or not spec.strip():
+        return 1, None
+    s = spec.strip()
+    if s.isdigit() and int(s) >= 1:
+        return int(s), None
+    points = [t.strip() for t in s.split(",") if t.strip()]
+    if points and all(PART_TIME.fullmatch(t) for t in points):
+        return len(points) + 1, points
+    raise ValueError(f"--notes-parts must be a number of parts (e.g. 2) or the times where the later parts begin (e.g. 02:27 or "
+                     f"01:00,02:30), not {spec!r}")
+
+
+def part_files(fstem: str, n: int) -> list[str]:
+    """The notes files: one for the lecture, or <name>.partK.reading-notes.md for each of n parts."""
+    return [f"{fstem}.reading-notes.md"] if n == 1 else [f"{fstem}.part{k}.reading-notes.md" for k in range(1, n + 1)]
+
+
+def parts_prompt(files: list[str], points: list[str] | None, revising: bool) -> str:
+    """The section added to the prompt when the lecture gets one set of notes per part."""
+    n = len(files)
+    how = (f"The parts begin at these times of the recording (the first at its start, the last ends with it): "
+           f"{', '.join(points)}. Find the exact place of each cut in the transcript, at the pause or change of topic nearest to it."
+           if points else
+           f"Find the {n} natural parts of the lecture in the transcript: a change of speaker, a break, a change of activity or "
+           "of subject. Say in each part's \"How to use these notes\" where it begins and ends in the recording.")
+    prev = (" The previous version (see Inputs) covers the whole lecture in one document: split its content between the parts, "
+            "and write `CHANGES.md` saying how." if revising else "")
+    return (f"\n## Separate notes for each part of the lecture\n\n"
+            f"The user wants **{n} separate sets of notes, one for each part of the lecture, not one document**. This section "
+            f"overrides the Output and Structure sections above wherever they differ.\n\n"
+            f"- {how}\n"
+            f"- Write {n} files: " + ", ".join(f"`{f}`" for f in files) + ". Each is complete and stands alone: its own YAML header "
+            "(the title names the subject of that part; the subtitle says \"Lecture notes for part K of N of <the lecture> · <course>\"), "
+            "\"How to use these notes\", \"at a glance\", chapters, a synthesis, review questions, glossary, sources and "
+            "\"what comes next\" (for the last part, the next session; for the others, the next part). Chapter numbers start again at "
+            "1 in each document. Put the course organisation in the part where it was said.\n"
+            "- A part covers only its own stretch of the recording: do not repeat content between parts. Where a part depends on "
+            "another, say so and refer to it (\"see part 2\").\n"
+            "- Figures share the folder `figures/`: start every file name with the part (`fig-p1-…`, `fig-p2-…`); a single "
+            "`make_figures.py` draws them all.\n"
+            "- `sh build/build.sh` builds every `*.reading-notes.md` file of the folder, so one run builds all the parts.\n"
+            "- Do the verification step (step 5) for each part separately, and look at the pages of each part."
+            f"{prev}\n"
+            "- The final report is per part: the files written, the time range, what you could not verify.\n")
+
+
 def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdir: Path, fstem: str, name: str,
                   transcript: Path | None, args) -> None:
     """Prepare reading-notes/ (inputs, build kit, figure style, prompt) and run Claude Code on it. Without a transcript
@@ -2772,8 +2842,14 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
     notes_dir = outdir / "reading-notes"
     for sub in ("build", "figures", "inputs"):
         (notes_dir / sub).mkdir(parents=True, exist_ok=True)
-    notes_file = f"{fstem}.reading-notes.md"
-    print(f"\npreparing the student notes in {notes_dir} ...")
+    n_parts, points = parse_parts(args.notes_parts)
+    if n_parts > 1 and transcript is None:
+        print("note: --notes-parts needs a recording; the notes from the slides alone are one document")
+        n_parts, points = 1, None
+    notes_files = part_files(fstem, n_parts)
+    notes_file = notes_files[0]
+    combined = f"{fstem}.reading-notes.md"  # the one-document version, which a run with parts replaces
+    print(f"\npreparing the student notes in {notes_dir}" + (f" ({n_parts} parts) ..." if n_parts > 1 else " ..."))
 
     # inputs: slides (text, speaker notes, chart data) and extra documents
     real_slides = [sl for sl in slides if sl.get("kind") in ("pptx", "pdf")]
@@ -2794,17 +2870,26 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
         extras.append(f"`inputs/{dst.name}` (from {p.name})")
 
     # previous version: revise it instead of starting from scratch
-    previous = notes_dir / notes_file
-    revising = previous.exists() and not args.notes_fresh
+    previous = notes_dir / (combined if n_parts > 1 else notes_file)  # with parts: the one-document version, if there is one
+    existing_parts = [notes_dir / f for f in notes_files if (notes_dir / f).exists()] if n_parts > 1 else []
+    revising = (previous.exists() or bool(existing_parts)) and not args.notes_fresh
     marker = notes_dir / "inputs" / "SLIDES-ONLY"  # the notes there were written without a recording
-    from_slides = revising and marker.exists() and transcript is not None
+    from_slides = revising and marker.exists() and transcript is not None and n_parts == 1
     if transcript is None:
         marker.write_text("These notes were written from the slides alone (no recording).\n", encoding="utf-8")
     if revising:
-        shutil.copyfile(previous, notes_dir / "inputs" / "previous-notes.md")
+        for old in (notes_dir / "inputs").glob("previous-*.md"):
+            old.unlink()
+        if previous.exists():
+            shutil.copyfile(previous, notes_dir / "inputs" / "previous-notes.md")
+            shown = previous.name
+        else:
+            for k, p in enumerate(existing_parts, 1):
+                shutil.copyfile(p, notes_dir / "inputs" / f"previous-part{k}.md")
+            shown = ", ".join(p.name for p in existing_parts)
         if from_slides:
             print(f"the earlier {notes_file} was written from the slides alone: Claude will rework it with the transcript")
-        print(f"an earlier version of {notes_file} exists: Claude will revise it (inputs/previous-notes.md) and write CHANGES.md "
+        print(f"an earlier version ({shown}) exists: Claude will revise it (inputs/previous-*.md) and write CHANGES.md "
               "(--notes-fresh to start from scratch)")
 
     # build kit (existing files are kept, so that changes made by hand or by Claude survive a new run)
@@ -2819,8 +2904,8 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
         notes_dir / "figures" / "style.py": KIT_STYLE_PY.replace("$figfont", sans_font if sans_font == "Avenir Next" else "DejaVu Sans"),
     }
     for path, text in kit.items():
-        old_build = path.name == "build.sh" and path.exists() and "no-latex" not in path.read_text(encoding="utf-8")
-        if not path.exists() or args.notes_fresh or old_build:  # an old build.sh does not know about --latex: replace it
+        old_build = path.name == "build.sh" and path.exists() and "build-kit 2" not in path.read_text(encoding="utf-8")
+        if not path.exists() or args.notes_fresh or old_build:  # an old build.sh builds one file only and ignores --latex: replace it
             path.write_text(text, encoding="utf-8")
     (notes_dir / "build" / "build.sh").chmod(0o755)
     no_latex = notes_dir / "build" / "no-latex"
@@ -2847,6 +2932,8 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
         ("s: " + ", ".join(r.name for r in recs) if len(recs) > 1 else ": " + recs[0].name if recs else ": none (it failed)")
     if transcript is None:
         revise = STUDENT_NOTES_REVISE_SLIDES
+    elif n_parts > 1:
+        revise = STUDENT_NOTES_REVISE_PARTS
     else:
         revise = STUDENT_NOTES_REVISE_FROM_SLIDES if from_slides else STUDENT_NOTES_REVISE
     changes = ("content from the recording, now available" if from_slides else
@@ -2856,10 +2943,13 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
         "context": args.notes_context or "none given; infer the course and audience from the slides.",
         "author": args.notes_author or "<programme> · <institution> · <lecturer(s)>, as the slides or the context above show "
                                        "them; leave this line out if neither does",
-        "transcript": rel_transcript, "extras": "; ".join(extras) if extras else "none.", "notes_file": notes_file,
+        "transcript": rel_transcript, "extras": "; ".join(extras) if extras else "none.",
+        "notes_file": notes_file if n_parts == 1 else f"{fstem}.part<K>.reading-notes.md",
         "previous": revise if revising else "",
         "changes_output": ("- `CHANGES.md`: what changed from the previous version and why (corrections, additions, "
                            f"{changes}).\n" if revising else "")})
+    if n_parts > 1:
+        prompt += parts_prompt(notes_files, points, revising)
     if args.latex == "no":
         prompt += ("\n## No PDF this time\n\nThis run has no LaTeX (none installed, or `--latex no`), so `sh build/build.sh` writes "
                    "the DOCX only. Skip the PDF everywhere above: do not try to make or look at one, and do not change `build/` to "
@@ -2920,15 +3010,28 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
                 print("warning: Claude Code ended with an error")
     elif proc.returncode:
         print(f"warning: Claude Code failed (exit code {proc.returncode})")
-    out_md, out_pdf = notes_dir / notes_file, notes_dir / notes_file.replace(".md", ".pdf")
-    if out_md.exists() and transcript is not None and marker.exists() and final and not final.get("is_error"):
+    ok_run = bool(final) and not final.get("is_error")
+    made = [notes_dir / f for f in notes_files if (notes_dir / f).exists()]
+    if made and transcript is not None and marker.exists() and ok_run:
         marker.unlink()  # reworked with the recording
-    if out_md.exists():
+    for out_md in made:
+        out_pdf = out_md.with_suffix(".pdf")
         print(f"student notes: {out_md}" + (f" and {out_pdf.name}" if out_pdf.exists() else
                                             " (PDF not built yet: sh build/build.sh)" if args.latex == "yes" else " (no PDF: --latex no)"))
-    else:
+    if not made:
         print(f"no student notes were written; the prepared folder is {notes_dir} (you can also open it in Claude Code and "
               "ask it to follow PROMPT.md)")
+    elif n_parts > 1 and len(made) < n_parts:
+        print(f"warning: only {len(made)} of the {n_parts} parts were written")
+    elif n_parts > 1 and ok_run:  # the one-document version is replaced by the parts: keep it, out of the way
+        old = [notes_dir / f"{fstem}.reading-notes{ext}" for ext in (".md", ".pdf", ".docx")]
+        old = [p for p in old if p.exists()]
+        if old:
+            keep = notes_dir / "superseded"
+            keep.mkdir(exist_ok=True)
+            for p in old:
+                shutil.move(str(p), str(keep / p.name))
+            print(f"the one-document version was moved to {keep.name}/ ({', '.join(p.name for p in old)})")
 
 
 # ----------------------------------------------------------------------------------------------- main
@@ -3135,6 +3238,13 @@ def main() -> int:
                          "only slides are given)")
     sn.add_argument("--notes-language", default="English", help="language of the student notes (default English)")
     sn.add_argument("--notes-context", help="what Claude should know: course, audience, lecturer, e.g. \"MBA students; lecturer Prof. X\"")
+    sn.add_argument("--notes-parts", metavar="N|TIMES",
+                    help="write one set of notes for each part of the lecture instead of one document: a number of parts that "
+                         "Claude finds in the transcript (e.g. 2), or the times where the later parts begin (e.g. 02:27, or "
+                         "01:00,02:30 for three; with several recordings, e.g. \"P2 00:10:00\")")
+    sn.add_argument("--notes-only", action="store_true",
+                    help="only write the student notes, from the transcript of an earlier run in the same output folder: "
+                         "nothing is transcribed, matched or written again (implies --student-notes)")
     sn.add_argument("--notes-course", help="course name for the running header of the PDF (default: the lecture name)")
     sn.add_argument("--notes-author", help="the author line of the notes, e.g. \"MSc in Biology · University X · Prof. Y\" "
                     "(default: Claude takes the programme, institution and lecturer from the slides or from --notes-context, "
@@ -3161,6 +3271,12 @@ def main() -> int:
         if not exe:
             ap.error(f"--mlx-command {args.mlx_command} not found")
         ENV["mlx_whisper"] = str(Path(exe).expanduser())
+    try:
+        parse_parts(args.notes_parts)
+    except ValueError as e:
+        ap.error(str(e))
+    if args.notes_only:
+        args.student_notes = True
     if args.setup:
         return setup(args)
     if args.check:
