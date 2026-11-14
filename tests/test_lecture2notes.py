@@ -223,7 +223,7 @@ class AIChoice(unittest.TestCase):
 
     def test_command_lines(self):
         out = Path("/out")
-        agy = m.ai_argv("agy", "/x/agy", self.args(notes_model="m1", notes_ai_args="--sandbox"), out)
+        agy = m.ai_argv("agy", "/x/agy", self.args(notes_model="m1", notes_ai_args="--sandbox"), out)  # out: the AI's own folder
         self.assertEqual(agy[:2], ["/x/agy", "-p"])
         self.assertIn("stream-json", agy)
         self.assertNotIn("--mode", agy)  # accept-edits would deny the shell commands in print mode
@@ -265,6 +265,33 @@ class AIChoice(unittest.TestCase):
         final, shown = self.read("copilot", ["Both parts are written.\n", "Checked.\n"])  # Copilot's text is the report
         self.assertEqual(final["result"], "Both parts are written.\nChecked.")
         self.assertIsNone(self.read("agy", ["not json\n"])[0])
+
+
+class NotesFolders(unittest.TestCase):
+    def test_one_folder_per_ai_and_claude_may_reuse_the_old_name(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(sys, "stdout", io.StringIO()):
+            d = Path(d)
+            self.assertEqual(m.notes_folder(d, "agy"), d / "reading-notes-agy")
+            self.assertEqual(m.notes_folder(d, "claude"), d / "reading-notes-claude")  # nothing there yet: a new folder
+            (d / "reading-notes").mkdir()  # a folder from before the AI's name was part of it
+            self.assertEqual(m.notes_folder(d, "claude"), d / "reading-notes")  # Claude Code reuses it
+            self.assertEqual(m.notes_folder(d, "agy"), d / "reading-notes-agy")  # the others never touch it
+            self.assertEqual(m.notes_folder(d, "copilot"), d / "reading-notes-copilot")
+            (d / "reading-notes-claude").mkdir()  # once the new one exists, it wins
+            self.assertEqual(m.notes_folder(d, "claude"), d / "reading-notes-claude")
+
+    def test_screens_are_taken_from_the_notes_of_a_run_without_slides(self):
+        notes = ("---\ntitle: x\n---\n\n## Slide 1: Intro `[00:00:05 – 00:01:00]`\n\n![](pics/slide-001.png){width=85%}\n\n"
+                 "**On the screen** (read by OCR at 00:00:30)\n\n- Welcome\n- Agenda\n\n**Key points from the lecture**\n\n- A key sentence.\n\n"
+                 "**What was said**\n\n> **[00:00:05]** Hello everybody.\n\n## Slide 2: Second `[00:01:00 – 00:02:00]`\n\n"
+                 "*Nothing in the recording was assigned to this slide.*\n")
+        text = m.screens_markdown(notes)
+        self.assertIn("## Slide 1: Intro", text)
+        self.assertIn("- Welcome", text)
+        self.assertIn("- Agenda", text)
+        for left_out in ("A key sentence", "Hello everybody", "slide-001.png"):
+            self.assertNotIn(left_out, text)
+        self.assertIsNone(m.screens_markdown("## Slide 1: x\n\nNo screens read here.\n"))
 
 
 class EngineChoice(unittest.TestCase):
@@ -478,6 +505,9 @@ class NotesPartsEndToEnd(unittest.TestCase):
             self.assertIn("previous-part", prompt)  # the revise text for parts
             self.assertEqual((notes / "inputs" / "previous-notes.md").read_text(encoding="utf-8"), "# The old single document\n")
             self.assertIn("build-kit 2", (notes / "build" / "build.sh").read_text(encoding="utf-8"))
+            self.assertTrue((notes / "inputs" / "transcript.md").exists())  # the AI works from its own folder only
+            self.assertIn("inputs/transcript.md", prompt)
+            self.assertIn("Work only in this folder", prompt)
             self.assertFalse((out / "v.notes.md").stat().st_mtime > (notes / "PROMPT.md").stat().st_mtime)  # nothing was rewritten
 
 
@@ -508,8 +538,10 @@ class AIEndToEnd(unittest.TestCase):
             self.assertIn("run_command: echo hi", r.stdout)
             self.assertIn("All done here", r.stdout)
             self.assertIn("student notes:", r.stdout)
-            self.assertEqual((d / "out" / "reading-notes" / "v.reading-notes.md").read_text(encoding="utf-8"), "# the notes\n")
-            prompt = (d / "out" / "reading-notes" / "PROMPT.md").read_text(encoding="utf-8")
+            folder = d / "out" / "reading-notes-agy"  # one folder per AI
+            self.assertEqual((folder / "v.reading-notes.md").read_text(encoding="utf-8"), "# the notes\n")
+            self.assertFalse((d / "out" / "reading-notes").exists())
+            prompt = (folder / "PROMPT.md").read_text(encoding="utf-8")
             self.assertIn("About your tools", prompt)  # the note for AIs that are not Claude Code
 
 

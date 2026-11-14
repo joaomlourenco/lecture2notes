@@ -2129,7 +2129,7 @@ typographically good PDF (via LaTeX) and a DOCX.
 - **Slides**: `inputs/slides.md`: the text of every slide, the speaker notes, and the data behind PPTX charts.
   Speaker notes are the lecturer's private notes: use them to understand the slides, never present them as said in
   class, and never reveal results that they say students should discover for themselves.
-- **Other documents**: $extras
+$screens- **Other documents**: $extras
 $previous
 ## Output (in this folder)
 
@@ -2931,21 +2931,21 @@ def choose_ai(args) -> tuple[str, str] | None:
     return pick, found[pick]
 
 
-def ai_argv(name: str, exe: str, args, outdir: Path) -> list[str]:
+def ai_argv(name: str, exe: str, args, notes_dir: Path) -> list[str]:
     """The command line that runs the AI on PROMPT.md without a person at the keyboard. Claude Code and Copilot take a list of
     the commands they may run; agy's command line has no such list, but in its print mode (no --mode) it runs commands and
     edits files in its workspace without asking, which is what the notes need."""
     if name == "claude":
         tools = ["Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "Task", "Agent", "TodoWrite"]
         tools += [f"Bash({c}:*)" for c in NOTES_COMMANDS] + [f"Bash({s})" for s in NOTES_SCRIPTS]
-        cmd = [exe, "-p", NOTES_TASK, "--permission-mode", "acceptEdits", "--allowedTools", *tools, "--add-dir", str(outdir),
+        cmd = [exe, "-p", NOTES_TASK, "--permission-mode", "acceptEdits", "--allowedTools", *tools, "--add-dir", str(notes_dir),
                "--output-format", "stream-json", "--verbose"]
         if args.notes_budget:
             cmd += ["--max-budget-usd", f"{args.notes_budget:g}"]
     elif name == "agy":
-        cmd = [exe, "-p", NOTES_TASK, "--add-dir", str(outdir), "--output-format", "stream-json"]
+        cmd = [exe, "-p", NOTES_TASK, "--add-dir", str(notes_dir), "--output-format", "stream-json"]
     else:  # copilot
-        cmd = [exe, "-p", NOTES_TASK, "-s", "--no-ask-user", "--no-auto-update", "--add-dir", str(outdir), "--allow-tool", "write"]
+        cmd = [exe, "-p", NOTES_TASK, "-s", "--no-ask-user", "--no-auto-update", "--add-dir", str(notes_dir), "--allow-tool", "write"]
         for c in NOTES_COMMANDS:
             cmd += ["--allow-tool", f"shell({c}:*)"]
         for s in NOTES_SCRIPTS:
@@ -2997,11 +2997,41 @@ def read_ai_output(name: str, lines) -> dict | None:
     return final
 
 
+def notes_folder(outdir: Path, ai: str) -> Path:
+    """The folder of the notes of one AI: reading-notes-<ai>, so that two AIs never overwrite each other. Claude Code may reuse
+    a folder named just reading-notes, from before the name of the AI was part of it (but not when reading-notes-claude exists)."""
+    own, legacy = outdir / f"reading-notes-{ai}", outdir / "reading-notes"
+    if ai == "claude" and not own.exists() and legacy.exists():
+        print(f"using the existing folder {legacy.name}, made before the AI's name was part of the folder name")
+        return legacy
+    return own
+
+
+def screens_markdown(notes_md: str) -> str | None:
+    """From the <name>.notes.md of a run without slides: for each distinct screen of the video, its heading (with the times it was
+    shown) and the text read on it by OCR. The speech (in the transcript) and the pictures are left out. None if there is none."""
+    out, keep, found = [], False, False
+    for ln in notes_md.splitlines():
+        if ln.startswith("## "):
+            out.append("\n" + ln)
+            keep = False
+        elif ln.startswith("**On the screen"):
+            found = keep = True
+            out.append(ln)
+        elif ln.startswith(("**Key points", "**What was said", "**Speaker notes", "*Nothing in the recording")):
+            keep = False
+        elif keep and ln.strip():
+            out.append(ln)
+    return ("# Screens of the video (text read by OCR)\n" + "\n".join(out) + "\n") if found else None
+
+
 def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdir: Path, fstem: str, name: str,
                   transcript: Path | None, args) -> None:
-    """Prepare reading-notes/ (inputs, build kit, figure style, prompt) and run Claude Code on it. Without a transcript
-    (the recording failed), the notes are written from the slides and the --notes-extra documents alone."""
-    notes_dir = outdir / "reading-notes"
+    """Prepare the reading-notes folder of the chosen AI (inputs, build kit, figure style, prompt) and run the AI on it. Without
+    a transcript (the recording failed), the notes are written from the slides and the --notes-extra documents alone."""
+    chosen = choose_ai(args)  # which command-line AI writes them (asked now, if several are installed)
+    ai_name, ai_exe = chosen if chosen else ("claude", None)
+    notes_dir = notes_folder(outdir, ai_name)  # one folder per AI, so that two AIs never overwrite each other
     for sub in ("build", "figures", "inputs"):
         (notes_dir / sub).mkdir(parents=True, exist_ok=True)
     n_parts, points = parse_parts(args.notes_parts)
@@ -3012,12 +3042,20 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
     notes_file = notes_files[0]
     combined = f"{fstem}.reading-notes.md"  # the one-document version, which a run with parts replaces
     print(f"\npreparing the student notes in {notes_dir}" + (f" ({n_parts} parts) ..." if n_parts > 1 else " ..."))
-    chosen = choose_ai(args)  # which command-line AI writes them (asked now, if several are installed)
-    ai_name, ai_exe = chosen if chosen else ("claude", None)
     if chosen:
         print(f"the notes will be written by {AI_TOOLS[ai_name][0]} ({ai_exe})")
 
-    # inputs: slides (text, speaker notes, chart data) and extra documents
+    # inputs: the transcript and the text of the screens (copied, so that the AI needs only this folder), slides, extra documents
+    screens = None
+    if transcript is not None:
+        shutil.copyfile(transcript, notes_dir / "inputs" / "transcript.md")
+        notes_md = outdir / f"{fstem}.notes.md"  # the notes of a run without slides: the text read on each screen
+        if notes_md.exists():
+            screens = screens_markdown(notes_md.read_text(encoding="utf-8"))
+        if screens:
+            (notes_dir / "inputs" / "screens.md").write_text(screens, encoding="utf-8")
+        else:
+            (notes_dir / "inputs" / "screens.md").unlink(missing_ok=True)
     real_slides = [sl for sl in slides if sl.get("kind") in ("pptx", "pdf")]
     (notes_dir / "inputs" / "slides.md").write_text(
         slides_markdown(decks, real_slides) if real_slides else "# Slides\n\nNo slides were given for this lecture.\n", encoding="utf-8")
@@ -3094,7 +3132,7 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
             sys.exit(f"error: --notes-prompt {tp} not found")
         template = tp.read_text(encoding="utf-8")
     try:
-        rel_transcript = os.path.relpath(transcript, notes_dir) if transcript else "none (the recording is not available)"
+        rel_transcript = "inputs/transcript.md" if transcript else "none (the recording is not available)"
     except ValueError:
         rel_transcript = str(transcript)
     lecture = name + (" — slides: " + ", ".join(d.name for d in decks) if decks else "") + "; recording" + \
@@ -3112,11 +3150,17 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
         "context": args.notes_context or "none given; infer the course and audience from the slides.",
         "author": args.notes_author or "<programme> · <institution> · <lecturer(s)>, as the slides or the context above show "
                                        "them; leave this line out if neither does",
+        "screens": ("- **Screens**: `inputs/screens.md`: the text read (by OCR) from each distinct screen of the recording, with the times at "
+                    "which it was shown. With no slide files, this is what was on the slides. OCR makes mistakes: use it to know "
+                    "what was on screen, and check numbers against what was said. It is long: look things up in it (by time or by topic) rather "
+                    "than reading it all.\n") if screens else "",
         "transcript": rel_transcript, "extras": "; ".join(extras) if extras else "none.",
         "notes_file": notes_file if n_parts == 1 else f"{fstem}.part<K>.reading-notes.md",
         "previous": revise if revising else "",
         "changes_output": ("- `CHANGES.md`: what changed from the previous version and why (corrections, additions, "
                            f"{changes}).\n" if revising else "")})
+    prompt += ("\n## Where to work\n\nWork only in this folder. Other folders next to it (for example `reading-notes-*`, made by other "
+               "runs, possibly by other AIs) belong to those runs: do not read, change or delete them.\n")
     if ai_name != "claude":
         prompt += ("\n## About your tools\n\nThese instructions were written for Claude Code. Where they mention subagents (the Task or "
                    "Agent tools) or any tool you do not have, do that work yourself, step by step and in the same order, to the same "
@@ -3139,7 +3183,7 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
               f"and run this again, or open {notes_dir} in it yourself and ask it to follow PROMPT.md")
         return
     label = AI_TOOLS[ai_name][0]
-    cmd = ai_argv(ai_name, ai_exe, args, outdir)
+    cmd = ai_argv(ai_name, ai_exe, args, notes_dir)
     print(f"running {label} in {notes_dir} (this takes a while: often 20-60 minutes; progress below) ...")
     proc = subprocess.Popen(cmd, cwd=notes_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
                             encoding="utf-8", errors="replace")

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **One notes folder per AI**: the student notes of each AI go in `reading-notes-claude`, `reading-notes-agy` or
+  `reading-notes-copilot`, so two AIs never overwrite each other and each revises only its own earlier notes. An existing
+  folder called just `reading-notes` is reused by Claude Code (unless `reading-notes-claude` exists).
+- The AI now works only in its own folder: the transcript is copied to `inputs/transcript.md`, and, for a lecture without
+  slide files, the text read from the screens to `inputs/screens.md` (before, Claude Code found that text on its own in the
+  output folder, which other AIs would not have). The prompt tells the AI to leave other folders alone.
+
 - **The student notes can be written by other command-line AIs, not only Claude Code**: Google's Antigravity CLI (`agy`)
   and GitHub Copilot CLI, besides `claude`. The script looks for them; with one installed it uses it, with several it asks
   you in a terminal (`--notes-ai NAME` skips the question; without a terminal it takes Claude Code if present). New options:
