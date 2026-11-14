@@ -29,7 +29,7 @@ A recorded lecture is hard to revise from: you can't skim a video or search it. 
 - **Handle real course material**: several decks, a lecture split across several recordings, going back to earlier slides, and Portuguese or English speech.
 - **Notice language mismatches** between the slides and the speech (for example English slides, Portuguese lecture) and adapt without extra options.
 - **Produce files that are easy to use**: Markdown you can edit or give to an LLM, and PDF with a table of contents.
-- **Write reading notes for the students** with Claude Code (`--student-notes`): a structured document with explanations, class discussions, figures redrawn from the slide data, review questions and a glossary, as PDF and DOCX.
+- **Write reading notes for the students** with a command-line AI of your choice, Claude Code, Antigravity (`agy`) or GitHub Copilot (`--student-notes`): a structured document with explanations, class discussions, figures redrawn from the slide data, review questions and a glossary, as PDF and DOCX.
 - **Re-runs are cheap**: the transcription and the video analysis are cached, so you can retune the alignment without transcribing again.
 
 ## What you get
@@ -208,9 +208,9 @@ python3 lecture2notes.py slides.pptx lecture.mov --switch-penalty 0.3
 | `--same-slide-threshold P` | Screens that differ in less than this percentage of the picture count as the same slide (default 0.5). |
 | `--chunk-minutes M` | Length of the time-based parts (default 5). |
 
-## Student notes with Claude Code
+## Student notes
 
-`--student-notes` adds a last step: [Claude Code](https://claude.com/claude-code) (the `claude` command line) writes
+`--student-notes` adds a last step: a command-line AI writes
 **reading notes for the students** from the transcript and the slides, in a `reading-notes/` folder inside the output
 folder.
 
@@ -221,17 +221,36 @@ python3 lecture2notes.py slides.pptx lecture.mp4 --student-notes \
     --notes-extra case-study.pdf
 ```
 
-The script prepares the folder and then runs Claude Code in it, non-interactively, showing its progress:
+The script prepares the folder and then runs the AI in it, non-interactively, showing its progress. **Which AI** is described in the next section.
+
+### Which AI writes the notes
+
+The notes can be written by any of these command-line programs. The script looks for them on every run:
+
+| `--notes-ai` | Program | What the script gives it |
+|---|---|---|
+| `claude` | [Claude Code](https://claude.com/claude-code) (`claude`) | An allow-list of the commands it may run, accept-edits mode, subagents for long transcripts, progress and cost shown. |
+| `agy` | Google's Antigravity CLI (`agy`, Gemini models) | Print mode with its folder added. Its command line has no allow-list: in print mode it runs commands and edits files in its workspace without asking (see Security). Progress is shown. |
+| `copilot` | GitHub Copilot CLI (`copilot`) | An allow-list of the commands it may run and permission to write files in the folder. Only its final report is shown. |
+
+- **`--notes-ai auto`** (the default): with one of them installed, it is used. With several, in a terminal the script lists them and asks you to choose (Enter takes the first, Claude Code); without a terminal it takes Claude Code if present, else the first it finds. `--notes-ai NAME` skips the question.
+- **`--notes-ai none`** only prepares the folder and `PROMPT.md`, and runs nothing. You can open the folder in any AI tool yourself and ask it to follow `PROMPT.md`.
+- **`--notes-ai-command PROGRAM`** names the program when it is not on `PATH` (`--claude-command` still works for Claude Code); **`--notes-ai-args "..."`** adds arguments (for example `--sandbox` for agy); **`--notes-model`** is passed as `--model`.
+- `--check` and `--setup` list which of them are installed. Signing in is yours to do: run the program once in a terminal. The script does not install these.
+- The prompt was written for Claude Code. For the others the script adds a short note: do the work yourself where the prompt mentions subagents, and do not skip the verification. The quality of the notes depends on the model, so read the result, and try the same lecture with two AIs if you want to compare (`--notes-only` makes that quick; each run needs its own output folder or a copy of it, since a run revises what it finds).
+- Tested: all three were run on a trivial prompt (write a file, run a shell command) with the options above, and the script's whole flow (progress, report, notes files) was tested with a fake agy. A full lecture has been run only with Claude Code.
+
+What the folder holds:
 
 | In `reading-notes/` | What it is |
 |---|---|
-| `PROMPT.md` | The instructions given to Claude, filled in for this lecture |
+| `PROMPT.md` | The instructions given to the AI, filled in for this lecture |
 | `PROMPT-template.md` | The same instructions with placeholders: edit them once, reuse them with `--notes-prompt` |
 | `inputs/slides.md` | The text of every slide, the speaker notes (marked as private) and the data behind PPTX charts |
-| `inputs/*.txt` | The documents given with `--notes-extra` (PDF, PPTX, Markdown or text): readings, book chapters, case studies, handouts. Claude reads them as further sources, for explanations the lecture only hinted at and for precise references |
+| `inputs/*.txt` | The documents given with `--notes-extra` (PDF, PPTX, Markdown or text): readings, book chapters, case studies, handouts. The AI reads them as further sources, for explanations the lecture only hinted at and for precise references |
 | `build/` | The kit that turns the Markdown into PDF and DOCX: a Lua filter for the boxes, the LaTeX look, a Word template, `build.sh` |
-| `figures/style.py` | The palette and helpers that keep Claude's figures in one style |
-| `<name>.reading-notes.md` / `.pdf` / `.docx` | The notes, written by Claude |
+| `figures/style.py` | The palette and helpers that keep the AI's figures in one style |
+| `<name>.reading-notes.md` / `.pdf` / `.docx` | The notes, written by the AI |
 | `figures/` | `make_figures.py` and the figures it draws (PNG for Word, PDF for LaTeX) |
 
 The built-in prompt describes the method: check the transcript's quality and gaps first; read it with parallel
@@ -243,20 +262,20 @@ slides and added background apart; never present speaker notes as spoken; correc
 keep participants anonymous; leave out unverified anecdotes; and never reveal answers reserved for a future activity.
 
 **Revising.** If `reading-notes/` already holds notes (for example after you transcribe again with a better engine),
-Claude revises them against the new transcript instead of starting over, and writes `CHANGES.md`. `--notes-fresh`
+The AI revises them against the new transcript instead of starting over, and writes `CHANGES.md`. `--notes-fresh`
 starts from scratch. The kit files are kept between runs, so your own changes to them survive.
 
-**One set of notes per part.** A long recording often holds distinct parts (a lecturer and two guest speakers, a lecture followed by a workshop). With `--notes-parts` Claude writes **one complete set of notes for each part**, instead of one big document:
+**One set of notes per part.** A long recording often holds distinct parts (a lecturer and two guest speakers, a lecture followed by a workshop). With `--notes-parts` the AI writes **one complete set of notes for each part**, instead of one big document:
 
 ```bash
-# Claude finds the two parts in the transcript
+# the AI finds the two parts in the transcript
 python3 lecture2notes.py lecture.mov --student-notes --notes-parts 2
 
 # or you say where the later parts begin (times as in the transcript): two parts, cut at 02:27
 python3 lecture2notes.py lecture.mov --student-notes --notes-parts 02:27
 ```
 
-You get `<name>.part1.reading-notes.md` / `.pdf` / `.docx`, `<name>.part2...`, and so on. Each part stands alone, with its own title, key messages, chapters, review questions and glossary, covers only its own stretch of the recording without repeating the others, and has figures named `fig-p1-…`, `fig-p2-…` in the shared `figures/` folder. `sh build/build.sh` builds all the parts in one go. If a one-document version exists, Claude uses it as the starting point (`CHANGES.md` says how it was split) and, when the parts are done, it is moved to `reading-notes/superseded/`, not deleted.
+You get `<name>.part1.reading-notes.md` / `.pdf` / `.docx`, `<name>.part2...`, and so on. Each part stands alone, with its own title, key messages, chapters, review questions and glossary, covers only its own stretch of the recording without repeating the others, and has figures named `fig-p1-…`, `fig-p2-…` in the shared `figures/` folder. `sh build/build.sh` builds all the parts in one go. If a one-document version exists, the AI uses it as the starting point (`CHANGES.md` says how it was split) and, when the parts are done, it is moved to `reading-notes/superseded/`, not deleted.
 
 **Only the notes again.** `--notes-only` writes the student notes from the transcript of an earlier run in the same output folder, and does nothing else: no transcription, no matching, no new transcript or PDF. Use it to try `--notes-parts` or a new prompt on a lecture that is already processed:
 
@@ -266,14 +285,14 @@ python3 lecture2notes.py lecture.mov --notes-only --notes-parts 2
 
 **Without a recording.** When the recording of a lecture failed, give the slides alone (and the readings with
 `--notes-extra`). There is nothing to transcribe or align, so the script goes straight to the student notes
-(`--student-notes` is implied), in `"<deck> notes"/reading-notes/`. Claude gets a variant of the prompt: the slides
+(`--student-notes` is implied), in `"<deck> notes"/reading-notes/`. The AI gets a variant of the prompt: the slides
 and the speaker notes are the backbone, the readings supply the explanations, proofs and examples, and the notes say
 plainly that the recording is not available. They report nothing as said in class, and the slides' questions become
-"Think about it" boxes. Without readings, Claude relies on the slides and labelled general knowledge, so give the
+"Think about it" boxes. Without readings, the AI relies on the slides and labelled general knowledge, so give the
 readings whenever you can.
 
 If the recording turns up later, run the script with the slides and the recording. When the output folder is the
-same (recording and deck with the same name, or the same `-o`), Claude reworks the slides-only notes with the
+same (recording and deck with the same name, or the same `-o`), the AI reworks the slides-only notes with the
 transcript (adding what was said and discussed) and writes `CHANGES.md`.
 
 The notes open with a title block in this shape (the prompt shows it as the model):
@@ -286,19 +305,19 @@ Lecture of <day month year>
 ```
 
 The title and the subtitle come from the lecture. The author line is what you give with `--notes-author` (for example
-`--notes-author "MSc in Biology · University X · Prof. Y"`). Without it, Claude takes the programme, institution and
+`--notes-author "MSc in Biology · University X · Prof. Y"`). Without it, the AI takes the programme, institution and
 lecturer from the slides, or from `--notes-context`, and leaves the line out if they are not shown anywhere. Nothing
 about a person or a course is built into the script.
 
 **Options:** `--notes-language` (default English), `--notes-context`, `--notes-author` (the author line),
 `--notes-course` (PDF running header), `--notes-parts N|TIMES` (one set of notes per part), `--notes-only`,
-`--notes-extra FILE` (repeatable), `--notes-prompt FILE`, `--notes-model`, `--notes-budget USD` (API accounts),
-`--notes-fresh`, `--claude-command`.
+`--notes-extra FILE` (repeatable), `--notes-prompt FILE`, `--notes-ai`, `--notes-ai-command`, `--notes-ai-args`,
+`--notes-model`, `--notes-budget USD` (Claude Code only), `--notes-fresh`, `--claude-command`.
 
-**Requirements and cost.** Claude Code installed and logged in (run `claude` once and use `/login`), plus pandoc,
+**Requirements and cost.** One of the AI programs above, installed and signed in (run it once in a terminal), plus pandoc,
 poppler and Python with matplotlib and Pillow for the figures, and xelatex for the PDF (without it, or with `--latex no`,
-`build.sh` makes the DOCX only, a `build/no-latex` file records the choice, and Claude is told not to make a PDF). A lecture of a few hours typically takes
-20–60 minutes and a substantial amount of usage on your Claude plan or API account. Read the result before sharing it:
+`build.sh` makes the DOCX only, a `build/no-latex` file records the choice, and the AI is told not to make a PDF). A lecture of a few hours typically takes
+20–60 minutes and a substantial amount of usage on your AI plan or API account (about USD 6 with Claude Code for a 3 h 45 recording written in two parts). Read the result before sharing it:
 the notes are carefully sourced, but they are written from an automatic transcription.
 
 **Fonts.** The PDF uses Charter and Avenir Next when they are installed, and the TeX Gyre fonts otherwise. They are
@@ -310,12 +329,12 @@ complain about a missing font: install a fuller TeX distribution.
 file name. Special LaTeX characters in it (`_ & % # $ { } ~ ^ \`) are escaped for you, so a file called
 `Aula_01.mov` is fine.
 
-**Security.** Claude Code runs unattended with `--permission-mode acceptEdits` and an allow-list that includes
-`python3`, `pandoc`, `cp` and `mkdir`, which it needs to draw the figures and build the files. Everything it reads
+**Security.** The AI runs unattended. Claude Code runs with `--permission-mode acceptEdits` and an allow-list that includes
+`python3`, `pandoc`, `cp` and `mkdir`, which it needs to draw the figures and build the files; Copilot gets a similar list. agy has no such list on its command line: in print mode it runs commands and edits files in its workspace without asking, while `--mode accept-edits` made it refuse the shell commands the notes need (as observed with agy 1.4.12; add `--notes-ai-args "--sandbox"` to run it with terminal restrictions, which I have not tried on a full lecture). Everything it reads
 comes from the transcript, the slides, the speaker notes and the `--notes-extra` documents, and any text in those
 could try to give it instructions (a prompt injection). For your own lectures and readings that risk is small. For
 decks or documents from other people, read them first, or run the script in a throwaway account or a container. To
-tighten the allow-list, edit the `tools` list in `student_notes()` (for example, allow only
+tighten the allow-list, edit `NOTES_COMMANDS` in the script (for example, allow only
 `python3 figures/make_figures.py` and `sh build/build.sh`).
 
 ## How it works
@@ -327,7 +346,7 @@ tighten the allow-list, edit the `tools` list in `student_notes()` (for example,
    - *From the words.* Speech that the video can't place is matched by TF-IDF cosine similarity between the speech (with its neighbouring segments) and the slide text. A Viterbi path through the slides charges `--switch-penalty` for each change, so sections don't flicker. It may return to earlier slides (use `--forward-only` to forbid that), and it stays between the slides the video identified before and after.
    - *Without slides.* The video is cut where a large part of the picture changes. Short pieces are merged, a piece that only adds to the previous one (a bullet appearing) stays the same slide, and identical screens are the same slide even when you come back to them later. Each distinct screen is saved as a picture, and tesseract reads its text, which becomes that section's text and title. If the video has no distinct screens, the speech is cut at pauses into parts of about `--chunk-minutes` minutes, each titled with its most distinctive words.
 4. **Output.** The Markdown is written, then, if `--latex` is `yes` (the default when a LaTeX engine is installed), pandoc and LaTeX turn it into PDF.
-5. **Student notes** (optional): Claude Code writes the reading notes, as described above.
+5. **Student notes** (optional): a command-line AI (Claude Code, Antigravity agy or GitHub Copilot) writes the reading notes, as described above.
 
 ## Caches
 
@@ -402,7 +421,7 @@ is read). Its main parts, in file order:
 `align`, `align_pinned`, `clean_numbers`, `to_global`, `drop_repetitions`, `detect_language`, `key_sentences`,
 `lecture_label`, `tex_escape`, `fill_template`, `stale_reason`, `parse_srt` and `parse_mw_json` take and return plain data, so they are easy to test without any recording.
 
-**Tests.** `tests/test_lecture2notes.py` uses only the standard library (31 tests: the pure functions, the notes in parts and the kit's build script, the choice of
+**Tests.** `tests/test_lecture2notes.py` uses only the standard library (41 tests: the pure functions, the choice of AI and how each one is run and read (with a fake agy), the notes in parts and the kit's build script, the choice of
 engine by platform, the MacWhisper integration with a fake `mw`, the install offer with a fake terminal and brew, the
 command line, and a smoke test that makes a short video, gives the script a fake Whisper transcription and checks the
 files written). Run them from the repository folder:

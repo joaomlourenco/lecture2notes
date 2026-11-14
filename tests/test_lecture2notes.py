@@ -174,6 +174,99 @@ class NotesInParts(unittest.TestCase):
             self.assertEqual(len(list(d.glob("*.docx"))), 2)
 
 
+class AIChoice(unittest.TestCase):
+    """Which command-line AI writes the student notes, how it is run, and how its output is read."""
+
+    def args(self, **kw):
+        base = dict(notes_ai="auto", notes_ai_command=None, claude_command="claude", notes_ai_args=None, notes_model=None,
+                    notes_budget=None)
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def present(self, *names):
+        return mock.patch.object(m.shutil, "which", lambda c, *a, **k: f"/bin/{c}" if c in names else None)
+
+    def quiet(self):
+        return mock.patch.object(sys, "stdout", io.StringIO())
+
+    def test_only_the_installed_ones_are_found(self):
+        with self.present("agy"):
+            self.assertEqual(m.available_ais(self.args()), {"agy": "/bin/agy"})
+        with self.present():
+            self.assertEqual(m.available_ais(self.args()), {})
+
+    def test_one_installed_is_used_and_none_means_none(self):
+        with self.present("agy"), self.quiet():
+            self.assertEqual(m.choose_ai(self.args()), ("agy", "/bin/agy"))
+            self.assertIsNone(m.choose_ai(self.args(notes_ai="none")))
+            self.assertIsNone(m.choose_ai(self.args(notes_ai="copilot")))  # named, but not installed
+        with self.present(), self.quiet():
+            self.assertIsNone(m.choose_ai(self.args()))
+
+    def test_several_without_a_terminal(self):
+        with self.present("agy", "claude", "copilot"), self.quiet(), mock.patch.object(sys, "stdin", io.StringIO()):
+            self.assertEqual(m.choose_ai(self.args())[0], "claude")
+        with self.present("copilot", "agy"), self.quiet(), mock.patch.object(sys, "stdin", io.StringIO()):
+            self.assertEqual(m.choose_ai(self.args())[0], "agy")  # no Claude: the first in the list
+            self.assertEqual(m.choose_ai(self.args(notes_ai="copilot"))[0], "copilot")
+
+    def test_several_in_a_terminal_ask(self):
+        with self.present("agy", "claude", "copilot"), mock.patch.object(sys, "stdin", Terminal()), \
+                mock.patch.object(sys, "stdout", Terminal()) as out:
+            with mock.patch.object(builtins, "input", lambda prompt="": "2"):
+                self.assertEqual(m.choose_ai(self.args())[0], "agy")  # the order of the menu: claude, agy, copilot
+            with mock.patch.object(builtins, "input", lambda prompt="": ""):
+                self.assertEqual(m.choose_ai(self.args())[0], "claude")  # Enter: the first
+            with mock.patch.object(builtins, "input", lambda prompt="": "9"):
+                self.assertEqual(m.choose_ai(self.args())[0], "claude")  # not a choice: the first
+        self.assertIn("Which one should write", out.getvalue())
+
+    def test_command_lines(self):
+        out = Path("/out")
+        agy = m.ai_argv("agy", "/x/agy", self.args(notes_model="m1", notes_ai_args="--sandbox"), out)
+        self.assertEqual(agy[:2], ["/x/agy", "-p"])
+        self.assertIn("stream-json", agy)
+        self.assertNotIn("--mode", agy)  # accept-edits would deny the shell commands in print mode
+        self.assertEqual(agy[agy.index("--add-dir") + 1], "/out")
+        self.assertEqual(agy[-3:], ["--model", "m1", "--sandbox"])
+        claude = m.ai_argv("claude", "/x/claude", self.args(notes_budget=5), out)
+        self.assertEqual(claude[claude.index("--permission-mode") + 1], "acceptEdits")
+        self.assertIn("Bash(python3:*)", claude)
+        self.assertIn("Bash(sh build/build.sh)", claude)
+        self.assertEqual(claude[claude.index("--max-budget-usd") + 1], "5")
+        copilot = m.ai_argv("copilot", "/x/copilot", self.args(), out)
+        self.assertIn("-s", copilot)
+        self.assertIn("shell(python3:*)", copilot)
+        self.assertIn("shell(sh build/build.sh)", copilot)
+        self.assertEqual(copilot[copilot.index("--allow-tool") + 1], "write")
+
+    def read(self, name, lines):
+        with mock.patch.object(sys, "stdout", io.StringIO()) as out:
+            final = m.read_ai_output(name, lines)
+        return final, out.getvalue()
+
+    def test_reading_agy_events(self):
+        lines = [json.dumps({"event": "init", "init": {"tools": ["x"]}}),
+                 json.dumps({"event": "step_update", "step_update": {"step_type": "tool", "state": "ACTIVE", "tool_name": "run_command",
+                                                                    "tool_info": {"parameters": {"CommandLine": "echo hi"}}}}),
+                 json.dumps({"event": "result", "result": {"status": "SUCCESS", "response": "DONE\n", "num_turns": 1}}) + "\n"]
+        final, shown = self.read("agy", lines)
+        self.assertEqual((final["result"], final["is_error"], final["num_turns"]), ("DONE\n", False, 1))
+        self.assertIn("run_command: echo hi", shown)
+        final, _ = self.read("agy", [json.dumps({"event": "result", "result": {"status": "ERROR", "response": "boom"}})])
+        self.assertTrue(final["is_error"])
+
+    def test_reading_claude_events_and_plain_text(self):
+        lines = [json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read", "input": {"file_path": "a.md"}}]}}),
+                 json.dumps({"type": "result", "result": "Finished", "is_error": False, "total_cost_usd": 1.5, "num_turns": 3})]
+        final, shown = self.read("claude", lines)
+        self.assertEqual((final["result"], final["total_cost_usd"]), ("Finished", 1.5))
+        self.assertIn("Read: a.md", shown)
+        final, shown = self.read("copilot", ["Both parts are written.\n", "Checked.\n"])  # Copilot's text is the report
+        self.assertEqual(final["result"], "Both parts are written.\nChecked.")
+        self.assertIsNone(self.read("agy", ["not json\n"])[0])
+
+
 class EngineChoice(unittest.TestCase):
     def resolve(self, platform, machine="arm64", macwhisper=None, engine="auto"):
         args = argparse.Namespace(engine=engine)
@@ -355,7 +448,7 @@ class NotesPartsEndToEnd(unittest.TestCase):
     """--notes-only and --notes-parts: the prompt and the folder are prepared (Claude Code itself is not run)."""
 
     def run_script(self, *args):
-        return subprocess.run([sys.executable, "-B", str(SCRIPT), *args, "--install", "no", "--claude-command", "no-such-claude"],
+        return subprocess.run([sys.executable, "-B", str(SCRIPT), *args, "--install", "no", "--notes-ai", "none"],
                               capture_output=True, text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
 
     def test_parts_from_an_earlier_run(self):
@@ -386,6 +479,38 @@ class NotesPartsEndToEnd(unittest.TestCase):
             self.assertEqual((notes / "inputs" / "previous-notes.md").read_text(encoding="utf-8"), "# The old single document\n")
             self.assertIn("build-kit 2", (notes / "build" / "build.sh").read_text(encoding="utf-8"))
             self.assertFalse((out / "v.notes.md").stat().st_mtime > (notes / "PROMPT.md").stat().st_mtime)  # nothing was rewritten
+
+
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe") and sys.platform != "win32", "needs ffmpeg and sh")
+class AIEndToEnd(unittest.TestCase):
+    """The whole control flow with a fake `agy` (a shell script that writes the notes file and emits agy's events)."""
+
+    def test_notes_written_by_a_fake_agy(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=320x180:d=6:r=5", str(d / "v.mp4")], check=True)
+            (d / "w.json").write_text(json.dumps({"language": "en", "segments": [
+                {"start": 0, "end": 3, "text": " Hello and welcome to this lecture about algorithms and sorting."}]}), encoding="utf-8")
+            fake = d / "fake-agy"
+            fake.write_text('#!/bin/sh\n'
+                            'echo \'{"event":"step_update","step_update":{"step_type":"tool","state":"ACTIVE","tool_name":"run_command",'
+                            '"tool_info":{"parameters":{"CommandLine":"echo hi"}}}}\'\n'
+                            'echo "# the notes" > v.reading-notes.md\n'
+                            'echo \'{"event":"result","result":{"status":"SUCCESS","response":"All done here","num_turns":2}}\'\n')
+            fake.chmod(0o755)
+            run = lambda *a: subprocess.run([sys.executable, "-B", str(SCRIPT), str(d / "v.mp4"), "-o", str(d / "out"), "--install", "no", *a],
+                                            capture_output=True, text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
+            r = run("--whisper-json", str(d / "w.json"), "--video-sync", "off", "--latex", "no")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            r = run("--notes-only", "--notes-ai", "agy", "--notes-ai-command", str(fake))
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("written by Antigravity CLI (agy)", r.stdout)
+            self.assertIn("run_command: echo hi", r.stdout)
+            self.assertIn("All done here", r.stdout)
+            self.assertIn("student notes:", r.stdout)
+            self.assertEqual((d / "out" / "reading-notes" / "v.reading-notes.md").read_text(encoding="utf-8"), "# the notes\n")
+            prompt = (d / "out" / "reading-notes" / "PROMPT.md").read_text(encoding="utf-8")
+            self.assertIn("About your tools", prompt)  # the note for AIs that are not Claude Code
 
 
 if __name__ == "__main__":

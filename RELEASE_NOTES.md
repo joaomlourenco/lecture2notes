@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **The student notes can be written by other command-line AIs, not only Claude Code**: Google's Antigravity CLI (`agy`)
+  and GitHub Copilot CLI, besides `claude`. The script looks for them; with one installed it uses it, with several it asks
+  you in a terminal (`--notes-ai NAME` skips the question; without a terminal it takes Claude Code if present). New options:
+  `--notes-ai auto|claude|agy|copilot|none`, `--notes-ai-command`, `--notes-ai-args`. `--notes-ai none` only prepares the
+  folder and `PROMPT.md`. `--check` lists the AIs found. agy and Copilot were run on a trivial prompt and the whole flow
+  was tested with a fake agy; a full lecture has been run only with Claude Code. agy's command line has no allow-list of
+  commands (see Security in the README).
+
 - **One set of student notes per part of a lecture**: `--notes-parts N` (Claude finds N parts in the transcript) or
   `--notes-parts 02:27` / `01:00,02:30` (the times where the later parts begin). Claude writes
   `<name>.partK.reading-notes.md`, one complete, standalone document for each part, with figures named by part. The build

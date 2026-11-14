@@ -56,7 +56,7 @@ How it works
        Without a usable video (audio only, or a camera that never shows distinct screens) the speech is cut into
        parts of about --chunk-minutes minutes, at pauses, titled with their most distinctive words.
     4. pandoc turns the Markdown files into PDF.
-    5. With --student-notes, Claude Code (the `claude` command line) writes reading notes for the students from the
+    5. With --student-notes, a command-line AI (Claude Code, Antigravity agy or GitHub Copilot) writes reading notes for the students from the
        transcript and the slides, following a built-in prompt (written to reading-notes/PROMPT.md): content checked
        against the recording, boxes, figures redrawn from the slide data, review questions and glossary, built as PDF
        and DOCX with a kit written next to them. An existing version is revised against the new transcription.
@@ -586,6 +586,10 @@ def report_env(args) -> int:
         want = TESS_LANG.get(args.language or "", None)
         if want and want not in langs:
             print(f"{'':<10} the language '{want}' for --language {args.language} is missing: {install_hint('tesseract')}")
+    ais = available_ais(args)
+    print("notes AI:   " + (", ".join(f"{AI_TOOLS[n][1]} ({p})" for n, p in ais.items()) if ais else
+                            "none found (claude, agy or copilot: student notes cannot be written)") +
+          (f"   [--notes-ai {args.notes_ai}]" if args.notes_ai != "auto" else ""))
     print(f"pdf files:  --latex {args.latex}" + (" (chosen)" if args.latex_chosen else f" (default: {'a LaTeX engine was found' if args.latex_found else 'no LaTeX engine found'})"))
     if args.engine == "macwhisper":
         print("engine: macwhisper; the model is the one selected in the MacWhisper app (--model provider:name uses another one)")
@@ -2861,6 +2865,138 @@ def parts_prompt(files: list[str], points: list[str] | None, revising: bool) -> 
             "- The final report is per part: the files written, the time range, what you could not verify.\n")
 
 
+# ----------------------------------------------------------------------------------------------- which AI writes the notes
+# The student notes are written by a command-line AI that reads PROMPT.md and works in the folder: Claude Code, Google's
+# Antigravity CLI (agy) or GitHub Copilot CLI. Each is run non-interactively, with the permissions it needs and no more
+# than its command line can say (see ai_argv).
+AI_TOOLS = {  # name -> (label, program, how to sign in)
+    "claude": ("Claude Code", "claude", "run `claude` once in a terminal and use /login"),
+    "agy": ("Antigravity CLI (agy)", "agy", "run `agy` once in a terminal and sign in"),
+    "copilot": ("GitHub Copilot CLI", "copilot", "run `copilot` once in a terminal and sign in with /login"),
+}
+NOTES_COMMANDS = ("python3", "pandoc", "pdftoppm", "pdftotext", "pdfinfo", "ls", "mkdir", "cp", "wc", "head", "grep")
+NOTES_SCRIPTS = ("sh build/build.sh", "./build/build.sh")
+NOTES_TASK = "Read PROMPT.md in the current folder and carry out the task it describes, to the end."
+
+
+def ai_program(name: str, args) -> str | None:
+    """Where the program of an AI is: --notes-ai-command for the AI named with --notes-ai, --claude-command for Claude, else
+    the usual name, looked up on PATH. None if it is not there."""
+    cmd = AI_TOOLS[name][1]
+    if args.notes_ai == name and args.notes_ai_command:
+        cmd = args.notes_ai_command
+    elif name == "claude" and args.claude_command != "claude":
+        cmd = args.claude_command
+    return shutil.which(cmd) or (str(Path(cmd).expanduser()) if Path(cmd).expanduser().is_file() else None)
+
+
+def available_ais(args) -> dict[str, str]:
+    found = {}
+    for name in AI_TOOLS:
+        path = ai_program(name, args)
+        if path:
+            found[name] = path
+    return found
+
+
+def choose_ai(args) -> tuple[str, str] | None:
+    """(name, path) of the AI that writes the notes: the one named with --notes-ai; else the only one installed; else, with
+    several, the user's choice in a terminal (without one, Claude Code if it is there). None: none (or --notes-ai none)."""
+    if args.notes_ai == "none":
+        return None
+    found = available_ais(args)
+    if args.notes_ai != "auto":
+        if args.notes_ai in found:
+            return args.notes_ai, found[args.notes_ai]
+        print(f"note: --notes-ai {args.notes_ai}: the program `{AI_TOOLS[args.notes_ai][1]}` was not found")
+        return None
+    if not found:
+        print("note: no command-line AI found (looked for " + ", ".join(f"`{p}`" for _, p, _ in AI_TOOLS.values()) + ")")
+        return None
+    names = list(found)
+    if len(names) == 1:
+        pick = names[0]
+    elif sys.stdin.isatty() and sys.stdout.isatty():
+        print("\nSeveral command-line AIs are installed. Which one should write the student notes?")
+        for i, n in enumerate(names, 1):
+            print(f"  {i}) {AI_TOOLS[n][0]}  ({found[n]})")
+        try:
+            reply = input("Number [1] (--notes-ai NAME skips this question): ").strip()
+        except EOFError:
+            reply = ""
+        pick = names[int(reply) - 1] if reply.isdigit() and 1 <= int(reply) <= len(names) else names[0]
+    else:
+        pick = "claude" if "claude" in found else names[0]
+        print(f"note: several command-line AIs are installed ({', '.join(names)}); using {AI_TOOLS[pick][0]} (--notes-ai NAME chooses)")
+    return pick, found[pick]
+
+
+def ai_argv(name: str, exe: str, args, outdir: Path) -> list[str]:
+    """The command line that runs the AI on PROMPT.md without a person at the keyboard. Claude Code and Copilot take a list of
+    the commands they may run; agy's command line has no such list, but in its print mode (no --mode) it runs commands and
+    edits files in its workspace without asking, which is what the notes need."""
+    if name == "claude":
+        tools = ["Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "Task", "Agent", "TodoWrite"]
+        tools += [f"Bash({c}:*)" for c in NOTES_COMMANDS] + [f"Bash({s})" for s in NOTES_SCRIPTS]
+        cmd = [exe, "-p", NOTES_TASK, "--permission-mode", "acceptEdits", "--allowedTools", *tools, "--add-dir", str(outdir),
+               "--output-format", "stream-json", "--verbose"]
+        if args.notes_budget:
+            cmd += ["--max-budget-usd", f"{args.notes_budget:g}"]
+    elif name == "agy":
+        cmd = [exe, "-p", NOTES_TASK, "--add-dir", str(outdir), "--output-format", "stream-json"]
+    else:  # copilot
+        cmd = [exe, "-p", NOTES_TASK, "-s", "--no-ask-user", "--no-auto-update", "--add-dir", str(outdir), "--allow-tool", "write"]
+        for c in NOTES_COMMANDS:
+            cmd += ["--allow-tool", f"shell({c}:*)"]
+        for s in NOTES_SCRIPTS:
+            cmd += ["--allow-tool", f"shell({s})"]
+    if args.notes_budget and name != "claude":
+        print(f"note: --notes-budget is for Claude Code; {AI_TOOLS[name][0]} has no such limit")
+    if args.notes_model:
+        cmd += ["--model", args.notes_model]
+    return cmd + shlex.split(args.notes_ai_args or "")
+
+
+def read_ai_output(name: str, lines) -> dict | None:
+    """Show what the AI is doing, line by line, and return its final result as {"result", "is_error", "num_turns",
+    "total_cost_usd"} (None if it gave none). Claude Code and agy write JSON events; Copilot's text is the report."""
+    final, text = None, []
+    for line in lines:
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            ev = None
+        if not isinstance(ev, dict):
+            if line.strip():
+                text.append(line.rstrip())
+                print("  " + line.rstrip()[:200])
+            continue
+        if name == "claude":
+            if ev.get("type") == "assistant":
+                for item in ev.get("message", {}).get("content", []):
+                    if item.get("type") == "text" and item.get("text", "").strip():
+                        print("  claude: " + " ".join(item["text"].split())[:220])
+                    elif item.get("type") == "tool_use":
+                        inp = item.get("input", {})
+                        what = inp.get("description") or inp.get("file_path") or inp.get("command") or inp.get("pattern") or ""
+                        print(f"  · {item.get('name')}: {str(what)[:150]}")
+            elif ev.get("type") == "result":
+                final = ev
+        elif ev.get("event") == "step_update":  # agy
+            step = ev.get("step_update", {})
+            if step.get("step_type") == "tool" and step.get("state") == "ACTIVE":
+                params = (step.get("tool_info") or {}).get("parameters") or {}
+                what = next((v for v in params.values() if isinstance(v, str)), "")
+                print(f"  · {step.get('tool_name')}: {what[:150]}")
+        elif ev.get("event") == "result":
+            r = ev.get("result", {})
+            final = {"result": r.get("response", ""), "is_error": r.get("status") != "SUCCESS", "num_turns": r.get("num_turns"),
+                     "total_cost_usd": None}
+    if final is None and text and name == "copilot":
+        final = {"result": "\n".join(text), "is_error": False, "num_turns": None, "total_cost_usd": None}
+    return final
+
+
 def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdir: Path, fstem: str, name: str,
                   transcript: Path | None, args) -> None:
     """Prepare reading-notes/ (inputs, build kit, figure style, prompt) and run Claude Code on it. Without a transcript
@@ -2876,6 +3012,10 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
     notes_file = notes_files[0]
     combined = f"{fstem}.reading-notes.md"  # the one-document version, which a run with parts replaces
     print(f"\npreparing the student notes in {notes_dir}" + (f" ({n_parts} parts) ..." if n_parts > 1 else " ..."))
+    chosen = choose_ai(args)  # which command-line AI writes them (asked now, if several are installed)
+    ai_name, ai_exe = chosen if chosen else ("claude", None)
+    if chosen:
+        print(f"the notes will be written by {AI_TOOLS[ai_name][0]} ({ai_exe})")
 
     # inputs: slides (text, speaker notes, chart data) and extra documents
     real_slides = [sl for sl in slides if sl.get("kind") in ("pptx", "pdf")]
@@ -2977,6 +3117,10 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
         "previous": revise if revising else "",
         "changes_output": ("- `CHANGES.md`: what changed from the previous version and why (corrections, additions, "
                            f"{changes}).\n" if revising else "")})
+    if ai_name != "claude":
+        prompt += ("\n## About your tools\n\nThese instructions were written for Claude Code. Where they mention subagents (the Task or "
+                   "Agent tools) or any tool you do not have, do that work yourself, step by step and in the same order, to the same "
+                   "standard: in particular, do not skip the verification step. Read the transcript in pieces if it is long.\n")
     if n_parts > 1:
         prompt += parts_prompt(notes_files, points, revising)
     if args.latex == "no":
@@ -2989,56 +3133,34 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
     print(f"wrote {notes_dir / 'PROMPT.md'} (the instructions given to Claude; to change them for future runs, edit "
           "PROMPT-template.md and pass it with --notes-prompt)")
 
-    claude = shutil.which(args.claude_command) or (args.claude_command if Path(args.claude_command).expanduser().is_file() else None)
-    if not claude:
-        print(f"note: `{args.claude_command}` (Claude Code) not found: install it from https://claude.com/claude-code, then run this "
-              f"again, or open {notes_dir} in Claude Code yourself and ask it to follow PROMPT.md")
+    if not chosen:
+        why = "--notes-ai none" if args.notes_ai == "none" else "no command-line AI was found or chosen"
+        print(f"note: not running an AI ({why}). To have the notes written, install one ({', '.join(f'`{p}`' for _, p, _ in AI_TOOLS.values())}) "
+              f"and run this again, or open {notes_dir} in it yourself and ask it to follow PROMPT.md")
         return
-    tools = ["Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "Task", "Agent", "TodoWrite",
-             "Bash(python3:*)", "Bash(sh build/build.sh)", "Bash(./build/build.sh)", "Bash(pandoc:*)", "Bash(pdftoppm:*)",
-             "Bash(pdftotext:*)", "Bash(pdfinfo:*)", "Bash(ls:*)", "Bash(mkdir:*)", "Bash(cp:*)", "Bash(wc:*)", "Bash(head:*)", "Bash(grep:*)"]
-    cmd = [claude, "-p", "Read PROMPT.md in the current folder and carry out the task it describes, to the end.",
-           "--permission-mode", "acceptEdits", "--allowedTools", *tools, "--add-dir", str(outdir),
-           "--output-format", "stream-json", "--verbose"]
-    if args.notes_model:
-        cmd += ["--model", args.notes_model]
-    if args.notes_budget:
-        cmd += ["--max-budget-usd", f"{args.notes_budget:g}"]
-    print(f"running Claude Code in {notes_dir} (this takes a while: often 20-60 minutes; progress below) ...")
-    proc = subprocess.Popen(cmd, cwd=notes_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-    final = None
-    for line in proc.stdout:
-        try:
-            ev = json.loads(line)
-        except json.JSONDecodeError:
-            if line.strip():
-                print("  " + line.rstrip()[:200])
-            continue
-        if ev.get("type") == "assistant":
-            for item in ev.get("message", {}).get("content", []):
-                if item.get("type") == "text" and item.get("text", "").strip():
-                    print("  claude: " + " ".join(item["text"].split())[:220])
-                elif item.get("type") == "tool_use":
-                    inp = item.get("input", {})
-                    what = inp.get("description") or inp.get("file_path") or inp.get("command") or inp.get("pattern") or ""
-                    print(f"  · {item.get('name')}: {str(what)[:150]}")
-        elif ev.get("type") == "result":
-            final = ev
+    label = AI_TOOLS[ai_name][0]
+    cmd = ai_argv(ai_name, ai_exe, args, outdir)
+    print(f"running {label} in {notes_dir} (this takes a while: often 20-60 minutes; progress below) ...")
+    proc = subprocess.Popen(cmd, cwd=notes_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+                            encoding="utf-8", errors="replace")
+    final = read_ai_output(ai_name, proc.stdout)
     proc.wait()
     if final:
         cost = final.get("total_cost_usd")
-        print("\nClaude's report:\n" + (final.get("result") or "").strip())
+        print(f"\n{label}'s report:\n" + (final.get("result") or "").strip())
         if cost is not None:
             print(f"(cost: about USD {cost:.2f}; {final.get('num_turns', '?')} turns)")
+        elif final.get("num_turns"):
+            print(f"({final['num_turns']} turns)")
         if final.get("is_error") or proc.returncode:
             text = (final.get("result") or "").lower()
-            if any(k in text for k in ("authenticate", "login", "oauth", "api key", "credit")):
-                print(f"warning: Claude Code could not log in or has no credit. Run `{args.claude_command}` once in a terminal, "
-                      "log in (/login), and run this command again.")
+            if any(k in text for k in ("authenticate", "login", "oauth", "api key", "credit", "sign in", "quota")):
+                print(f"warning: {label} could not sign in or has no credit left. {AI_TOOLS[ai_name][2].capitalize()}, and run this "
+                      "command again.")
             else:
-                print("warning: Claude Code ended with an error")
+                print(f"warning: {label} ended with an error")
     elif proc.returncode:
-        print(f"warning: Claude Code failed (exit code {proc.returncode})")
+        print(f"warning: {label} failed (exit code {proc.returncode})")
     ok_run = bool(final) and not final.get("is_error")
     made = [notes_dir / f for f in notes_files if (notes_dir / f).exists()]
     if made and transcript is not None and marker.exists() and ok_run:
@@ -3048,7 +3170,7 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
         print(f"student notes: {out_md}" + (f" and {out_pdf.name}" if out_pdf.exists() else
                                             " (PDF not built yet: sh build/build.sh)" if args.latex == "yes" else " (no PDF: --latex no)"))
     if not made:
-        print(f"no student notes were written; the prepared folder is {notes_dir} (you can also open it in Claude Code and "
+        print(f"no student notes were written; the prepared folder is {notes_dir} (you can also open it in a command-line AI and "
               "ask it to follow PROMPT.md)")
     elif n_parts > 1 and len(made) < n_parts:
         print(f"warning: only {len(made)} of the {n_parts} parts were written")
@@ -3260,32 +3382,40 @@ def main() -> int:
     ap.add_argument("--no-pdf", action="store_true", help="only write the Markdown files (the same as --latex no for the transcript and the notes)")
     ap.add_argument("--pdf-engine", help="pandoc PDF engine (default: xelatex, then lualatex, pdflatex)")
     ap.add_argument("--mainfont", help="main font for xelatex/lualatex")
-    sn = ap.add_argument_group("student notes (written by Claude Code, the `claude` command line)")
+    sn = ap.add_argument_group("student notes (written by a command-line AI: Claude Code, Antigravity agy or GitHub Copilot)")
     sn.add_argument("--student-notes", action="store_true",
                     help="also write reading notes for the students in <outdir>/reading-notes (Markdown, PDF, DOCX, figures), "
                          "with Claude Code; an existing version there is revised against the new transcription (on by default when "
                          "only slides are given)")
     sn.add_argument("--notes-language", default="English", help="language of the student notes (default English)")
-    sn.add_argument("--notes-context", help="what Claude should know: course, audience, lecturer, e.g. \"MBA students; lecturer Prof. X\"")
+    sn.add_argument("--notes-context", help="what the AI should know: course, audience, lecturer, e.g. \"MBA students; lecturer Prof. X\"")
     sn.add_argument("--notes-parts", metavar="N|TIMES",
                     help="write one set of notes for each part of the lecture instead of one document: a number of parts that "
-                         "Claude finds in the transcript (e.g. 2), or the times where the later parts begin (e.g. 02:27, or "
+                         "the AI finds in the transcript (e.g. 2), or the times where the later parts begin (e.g. 02:27, or "
                          "01:00,02:30 for three; with several recordings, e.g. \"P2 00:10:00\")")
     sn.add_argument("--notes-only", action="store_true",
                     help="only write the student notes, from the transcript of an earlier run in the same output folder: "
                          "nothing is transcribed, matched or written again (implies --student-notes)")
     sn.add_argument("--notes-course", help="course name for the running header of the PDF (default: the lecture name)")
     sn.add_argument("--notes-author", help="the author line of the notes, e.g. \"MSc in Biology · University X · Prof. Y\" "
-                    "(default: Claude takes the programme, institution and lecturer from the slides or from --notes-context, "
+                    "(default: the AI takes the programme, institution and lecturer from the slides or from --notes-context, "
                     "and leaves the line out if they are not shown)")
     sn.add_argument("--notes-extra", action="append", help="another document for the notes (PDF, PPTX, Markdown, text): readings, "
                     "case studies, slides given as handouts (repeat for several); essential when there is no recording")
     sn.add_argument("--notes-prompt", help="use this file as the prompt template instead of the built-in one "
                     "(start from the PROMPT-template.md written by any run)")
-    sn.add_argument("--notes-model", help="Claude model for the notes (default: Claude Code's default)")
+    sn.add_argument("--notes-ai", choices=("auto", "claude", "agy", "copilot", "none"), default="auto",
+                    help="which command-line AI writes the notes: auto (the default) = the one that is installed, or, if several, "
+                         "your choice in a terminal (without one, Claude Code); none = only prepare the folder and PROMPT.md, "
+                         "run no AI")
+    sn.add_argument("--notes-ai-command", metavar="PROGRAM", help="the program of the AI named with --notes-ai, if it is not on PATH")
+    sn.add_argument("--notes-ai-args", metavar="ARGS", help="extra arguments for the AI program, as one quoted string "
+                    "(e.g. \"--sandbox\" for agy)")
+    sn.add_argument("--notes-model", help="model for the notes, as the chosen AI names it (default: its own default)")
     sn.add_argument("--notes-budget", type=float, help="maximum spend in USD for the notes (API accounts)")
     sn.add_argument("--notes-fresh", action="store_true", help="start the notes from scratch, ignoring a previous version and its kit")
-    sn.add_argument("--claude-command", default="claude", help="the Claude Code program (default: claude)")
+    sn.add_argument("--claude-command", default="claude", help="the Claude Code program (default: claude); the same as "
+                    "--notes-ai-command with --notes-ai claude")
     args = ap.parse_args()
     global INSTALL_MODE
     INSTALL_MODE = args.install
@@ -3304,6 +3434,8 @@ def main() -> int:
         parse_parts(args.notes_parts)
     except ValueError as e:
         ap.error(str(e))
+    if args.notes_ai_command and args.notes_ai in ("auto", "none"):
+        ap.error("--notes-ai-command needs --notes-ai claude, agy or copilot, to say which AI the program is")
     if args.notes_only:
         args.student_notes = True
     if args.setup:
