@@ -119,6 +119,10 @@ class NotesInParts(unittest.TestCase):
             with self.assertRaises(ValueError, msg=bad):
                 m.parse_parts(bad)
 
+    def test_the_kit_is_prepared_without_pandoc(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(m.ENV, {"pandoc": None}):
+            self.assertFalse(m.make_reference_docx(Path(d) / "reference.docx"))  # no crash, no file
+
     def test_part_files(self):
         self.assertEqual(m.part_files("L", 1), ["L.reading-notes.md"])
         self.assertEqual(m.part_files("L", 2), ["L.part1.reading-notes.md", "L.part2.reading-notes.md"])

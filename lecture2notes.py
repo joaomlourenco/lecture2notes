@@ -2676,7 +2676,9 @@ def kit_fonts() -> tuple[str, str]:
 
 def make_reference_docx(dst: Path) -> bool:
     """A Word reference document with the box styles of boxes.lua, navy headings, Cambria text and Calibri headings."""
-    r = subprocess.run([tool("pandoc"), "--print-default-data-file", "reference.docx"], capture_output=True)
+    if not ENV.get("pandoc"):  # no pandoc: the kit is written anyway and student_notes() has said what is missing
+        return False
+    r = subprocess.run([ENV["pandoc"], "--print-default-data-file", "reference.docx"], capture_output=True)
     if r.returncode != 0 or not r.stdout:
         return False
     zin = zipfile.ZipFile(io.BytesIO(r.stdout))
@@ -2913,6 +2915,7 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
         no_latex.write_text("lecture2notes.py ran with --latex no: build.sh makes the DOCX only. Delete this file to make the PDF.\n")
     else:
         no_latex.unlink(missing_ok=True)
+    note_missing(["pandoc"], "to build the student notes as DOCX and PDF (the Markdown is written anyway)")
     ref = notes_dir / "build" / "reference.docx"
     if (not ref.exists() or args.notes_fresh) and not make_reference_docx(ref):
         print("warning: could not create build/reference.docx (pandoc); the DOCX will use Word's default styles")
