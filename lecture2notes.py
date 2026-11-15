@@ -1520,7 +1520,7 @@ def write_meta(json_path: Path, meta: dict) -> None:
     meta_path(json_path).write_text(json.dumps(meta), encoding="utf-8")
 
 
-def stale_reason(json_path: Path, recording: Path, model: str | None, language: str | None) -> str | None:
+def stale_reason(json_path: Path, recording: Path, model: str | None, language: str | None, switch: str | None = None) -> str | None:
     """Why a saved Whisper JSON should not be reused for this run (None: it can be). It is judged by the record written
     next to it; a JSON made before records existed has none and is trusted, as before. The engine does not matter:
     both engines write the same JSON."""
@@ -1534,7 +1534,265 @@ def stale_reason(json_path: Path, recording: Path, model: str | None, language: 
         return f"it was made with the model '{meta['model']}', not '{model}'"
     if language and meta.get("language") and meta["language"] != language:
         return f"it was transcribed as '{meta['language']}', not '{language}'"
+    if meta.get("language_switch") != switch:
+        return f"it was made with --language-switch {meta.get('language_switch') or 'off'}, not {switch or 'off'}"
     return None
+
+
+# ----------------------------------------------------------------------------------------------- speech that changes language
+# Whisper picks ONE language per file (from its first 30 seconds), so a recording that starts in Portuguese and goes on in
+# English comes out wrong in one of them. --language-switch cuts the audio where the language changes and transcribes each
+# part in its own language: at the times given ("pt 04:30 en"), or at the places the script finds ("auto").
+LANG_CODE = re.compile(r"[a-z]{2,3}")
+
+
+def parse_clock(tok: str) -> float | None:
+    """'04:30' = 4 min 30 s (minutes:seconds), '1:04:30' or '01:04:30' = hours:minutes:seconds, '270s' = seconds."""
+    m = re.fullmatch(r"(\d+):([0-5]\d)", tok)
+    if m:
+        return int(m[1]) * 60 + int(m[2])
+    m = re.fullmatch(r"(\d+):([0-5]\d):([0-5]\d)", tok)
+    if m:
+        return int(m[1]) * 3600 + int(m[2]) * 60 + int(m[3])
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)s", tok)
+    return float(m[1]) if m else None
+
+
+def normalize_switch(spec: str | None) -> str | None:
+    """The --language-switch text as the caches record it: lower case, single spaces; None if there is none."""
+    toks = [t for t in re.split(r"[\s,;]+", (spec or "").strip().lower()) if t]
+    return " ".join(toks) if toks else None
+
+
+def parse_language_switch(spec: str | None) -> tuple[str, list[dict] | None]:
+    """--language-switch: ('none', None); ('auto', None); or ('fixed', plan) for 'pt 04:30 en' (Portuguese until 4 min 30 s,
+    then English; 'pt 04:30 en 1:10:00 pt' has three parts), where plan = [{"language": "pt", "start": 0.0}, {"language":
+    "en", "start": 270.0}]. Raises ValueError for anything else."""
+    key = normalize_switch(spec)
+    if not key:
+        return "none", None
+    toks = key.split()
+    if toks == ["auto"]:
+        return "auto", None
+    if len(toks) < 3 or len(toks) % 2 == 0 or not all(LANG_CODE.fullmatch(t) for t in toks[0::2]):
+        raise ValueError(f"--language-switch must be auto or a plan like \"pt 04:30 en\" (a language, then a time and the next "
+                         f"language, ...), not {spec!r}")
+    plan = [{"language": toks[0], "start": 0.0}]
+    for when, lang in zip(toks[1::2], toks[2::2]):
+        t = parse_clock(when)
+        if t is None or t <= plan[-1]["start"]:
+            raise ValueError(f"--language-switch: {when!r} is not a time (m:ss, h:mm:ss or 270s) later than the one before it")
+        plan.append({"language": lang, "start": t})
+    return "fixed", plan
+
+
+def describe_plan(plan: list[dict]) -> str:
+    return ", then ".join(f"{p['language']} from {hms(p['start'])}" for p in plan)
+
+
+def switch_plan_of(json_path: Path) -> list[dict] | None:
+    """The language plan recorded in a transcription made with --language-switch, or None."""
+    try:
+        plan = json.loads(json_path.read_text(encoding="utf-8")).get("language_switch")
+    except (OSError, ValueError):
+        return None
+    return plan if isinstance(plan, list) and len(plan) > 1 else None
+
+
+# language detection by Whisper's own language classifier, in the Python of the engine (like MLX_DRIVER); it reads windows of the 16 kHz
+# wav directly, so nothing is cut into files.
+LANG_DRIVER = r"""
+import json, sys, wave
+import numpy as np
+a = json.loads(sys.argv[1])
+wf = wave.open(a["wav"], "rb")
+rate, total = wf.getframerate(), wf.getnframes()
+def chunk(t, w):
+    wf.setpos(min(int(t * rate), total))
+    return np.frombuffer(wf.readframes(int(w * rate)), dtype=np.int16).astype(np.float32) / 32768.0
+out = []
+if a["engine"] == "mlx":
+    import mlx.core as mx
+    from mlx_whisper import load_models
+    from mlx_whisper.audio import N_FRAMES, N_SAMPLES, log_mel_spectrogram, pad_or_trim
+    model = load_models.load_model(a["model"], dtype=mx.float16)
+    def probs_of(x):
+        mel = log_mel_spectrogram(x, n_mels=model.dims.n_mels, padding=N_SAMPLES)
+        return model.detect_language(pad_or_trim(mel, N_FRAMES, axis=-2).astype(mx.float16))[1]
+else:
+    import torch, whisper
+    from whisper.audio import N_FRAMES, N_SAMPLES, log_mel_spectrogram, pad_or_trim
+    model = whisper.load_model(a["model"])
+    dtype = torch.float16 if model.device.type == "cuda" else torch.float32
+    def probs_of(x):
+        mel = log_mel_spectrogram(x, model.dims.n_mels, padding=N_SAMPLES)
+        return model.detect_language(pad_or_trim(mel, N_FRAMES).to(model.device).to(dtype))[1]
+for t, w in a["jobs"]:
+    x = chunk(t, w)
+    if len(x) < rate:  # less than a second of audio
+        out.append(None)
+        continue
+    probs = probs_of(x)
+    lang = max(probs, key=probs.get)
+    out.append([lang, float(probs[lang])])
+print(json.dumps(out))
+"""
+
+
+def detection_engine(args) -> tuple[str, str]:
+    """(engine, model) that detect the language: the engine of the run if it is a Whisper one; with MacWhisper, mlx-whisper
+    or openai-whisper if installed."""
+    if args.engine in ("mlx", "openai"):
+        engine = args.engine
+    elif sys.platform == "darwin" and platform.machine() == "arm64" and ENV.get("mlx_whisper"):
+        engine = "mlx"
+    elif ENV.get("whisper"):
+        engine = "openai"
+    else:
+        sys.exit("error: --language-switch auto checks the language with Whisper, which needs mlx-whisper or openai-whisper "
+                 f"({PY} lecture2notes.py --setup --engine openai); or give the times yourself, as in --language-switch \"pt 04:30 en\"")
+    return engine, ("turbo" if ":" in args.model else args.model)  # a MacWhisper model id is no Whisper model
+
+
+def probe_languages(wav: Path, jobs: list[tuple[float, float]], engine: str, model: str) -> list[str | None]:
+    """The language of the speech in each (start, length) window of the wav, or None where it is unsure (silence, music)."""
+    exe = tool("mlx_whisper" if engine == "mlx" else "whisper")
+    payload = json.dumps({"engine": engine, "wav": str(wav), "jobs": jobs,
+                          "model": asr_model(argparse.Namespace(engine=engine), model)})
+    r = subprocess.run([_venv_python(exe), "-c", LANG_DRIVER, payload], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode != 0 or not r.stdout.strip():
+        sys.exit("error: could not detect the language with " + engine + " whisper:\n" + (r.stderr or r.stdout).strip()[-600:])
+    return [item[0] if item and item[1] >= 0.4 else None for item in json.loads(r.stdout.strip().splitlines()[-1])]
+
+
+def find_language_switches(detect, duration: float, step: float = 60.0, window: float = 30.0, fine_step: float = 5.0,
+                           fine_window: float = 10.0, min_samples: int = 2) -> list[dict]:
+    """Where the speech changes language: [{"language", "start"}], the first at 0. `detect(jobs)` gives the language (or None)
+    of each (start, length) window. The language is checked in a window of `window` s every `step` s; a language that holds for
+    fewer than `min_samples` windows in a row (a quoted sentence) is not a switch; each change is then placed within `fine_step` s
+    by checking shorter windows around it."""
+    starts = [i * step for i in range(int(max(duration - 10.0, 0.0) // step) + 1)]
+    labels = list(detect([(t, window) for t in starts]))
+    for order in (range(len(labels)), range(len(labels) - 1, -1, -1)):  # a window with no answer takes its neighbour's language
+        seen = None
+        for i in order:
+            if labels[i] is None:
+                labels[i] = seen
+            else:
+                seen = labels[i]
+    if labels[0] is None:
+        return []
+
+    def runs_of(lbls):
+        runs: list[list] = []
+        for i, lang in enumerate(lbls):
+            if runs and runs[-1][0] == lang:
+                runs[-1][2] = i
+            else:
+                runs.append([lang, i, i])
+        return runs
+
+    runs = runs_of(labels)
+    size = lambda k: runs[k][2] - runs[k][1] + 1
+    while len(runs) > 1:
+        shorts = [k for k in range(len(runs)) if size(k) < min_samples]
+        if not shorts:
+            break
+        neighbour = lambda k: max((j for j in (k - 1, k + 1) if 0 <= j < len(runs)), key=size)  # the longer of the runs next to it
+        short = min(shorts, key=lambda k: (size(k), -size(neighbour(k))))  # the shortest first, then the one with the surest neighbour
+        for i in range(runs[short][1], runs[short][2] + 1):
+            labels[i] = runs[neighbour(short)][0]
+        runs = runs_of(labels)
+    plan = [{"language": runs[0][0], "start": 0.0}]
+    for before, after in zip(runs, runs[1:]):
+        ta, tb = starts[before[2]], starts[after[1]]  # the last window in the old language, the first in the new one
+        fine, t = [], max(0.0, ta + window / 2 - fine_window)
+        while t <= tb + window / 2:
+            fine.append(t)
+            t += fine_step
+        found = detect([(t, fine_window) for t in fine])
+        first = len(fine)  # the first window from which all the rest are in the new language
+        for i in range(len(fine) - 1, -1, -1):
+            if found[i] in (None, after[0]):
+                first = i
+            else:
+                break
+        at = tb if first == len(fine) else fine[first] + (fine_step / 2 if first > 0 else 0.0)
+        plan.append({"language": after[0], "start": at})
+    return plan
+
+
+def snap_to_pause(wav: Path, estimate: float, reach: float = 10.0) -> float:
+    """Move a cut to the middle of the pause nearest to it (within `reach` seconds), so that no word is cut in two."""
+    t0 = max(0.0, estimate - reach)
+    r = subprocess.run([tool("ffmpeg"), "-hide_banner", "-nostats", "-ss", f"{t0:.3f}", "-t", f"{2 * reach:.3f}", "-i", str(wav), "-af",
+                        "silencedetect=noise=-35dB:d=0.35", "-f", "null", "-"], capture_output=True, text=True, errors="replace")
+    pauses, begin = [], None
+    for line in r.stderr.splitlines():
+        m = re.search(r"silence_start: (-?[\d.]+)", line)
+        if m:
+            begin = max(0.0, float(m[1]))
+            continue
+        m = re.search(r"silence_end: ([\d.]+)", line)
+        if m and begin is not None:
+            pauses.append(t0 + (begin + float(m[1])) / 2)
+            begin = None
+    return min(pauses, key=lambda p: abs(p - estimate)) if pauses else estimate
+
+
+def auto_language_plan(wav: Path, args) -> list[dict]:
+    """--language-switch auto: look for the language changes in the audio (see find_language_switches), and put each cut at a pause."""
+    engine, model = detection_engine(args)
+    duration = wav.stat().st_size / 32000.0
+    print(f"checking the language of the speech in {wav.name} ({hms(duration)}), one window every minute, with {engine} whisper "
+          f"(model {model}) ...")
+    plan = find_language_switches(lambda jobs: probe_languages(wav, jobs, engine, model), duration)
+    if not plan:
+        sys.exit("error: could not tell the language of the speech (no clear speech?): give --language, or the times yourself, "
+                 "as in --language-switch \"pt 04:30 en\"")
+    for p in plan[1:]:
+        p["start"] = round(snap_to_pause(wav, p["start"]), 2)
+    return plan
+
+
+def shift_segments(segs: list[dict], offset: float) -> list[dict]:
+    """The Whisper segments (and their words) moved `offset` seconds later."""
+    out = []
+    for s in segs:
+        s = dict(s, start=float(s["start"]) + offset, end=float(s["end"]) + offset)
+        if s.get("words"):
+            s["words"] = [dict(w, start=float(w["start"]) + offset, end=float(w["end"]) + offset) for w in s["words"]]
+        out.append(s)
+    return out
+
+
+def transcribe_in_languages(wav: Path, out_json: Path, args, plan: list[dict], workdir: Path, model: str, task: str | None = None) -> None:
+    """Transcribe (or translate) `wav` in pieces, each in the language of the plan, and write one Whisper-style JSON with the
+    segments of all the pieces at their times in the recording, the plan in "language_switch" and its first language in "language"."""
+    pieces = [(p["language"], p["start"], plan[i + 1]["start"] if i + 1 < len(plan) else None) for i, p in enumerate(plan)]
+    tmp = workdir / f".{wav.stem}.pieces"
+    tmp.mkdir(exist_ok=True)
+    segs: list[dict] = []
+    try:
+        for k, (lang, start, end) in enumerate(pieces, 1):
+            piece = tmp / f"{wav.stem}.piece{k}.wav"
+            cut = [tool("ffmpeg"), "-y", "-loglevel", "error", "-ss", f"{start:.3f}", "-i", str(wav)]
+            subprocess.run(cut + (["-t", f"{end - start:.3f}"] if end else []) + ["-c", "copy", str(piece)], check=True)
+            print(f"part {k} of {len(pieces)}: {lang}, from {hms(start)}" + (f" to {hms(end)}" if end else " to the end"))
+            result = tmp / f"{piece.stem}.json"
+            if args.engine == "macwhisper":
+                macwhisper_transcribe(piece, result, argparse.Namespace(**{**vars(args), "language": lang}))
+            else:
+                cmd = asr_command(args, piece, tmp, model, lang, task)
+                print(("translating" if task else "transcribing") + f" with {args.engine} whisper (this takes a while):", show_command(cmd))
+                subprocess.run(cmd, check=True)
+            segs += shift_segments(json.loads(result.read_text(encoding="utf-8")).get("segments", []), start)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    for i, sg in enumerate(segs):
+        sg["id"] = i
+    out_json.write_text(json.dumps({"text": " ".join(sg["text"].strip() for sg in segs), "language": plan[0]["language"],
+                                    "language_switch": plan, "segments": segs}, ensure_ascii=False), encoding="utf-8")
 
 
 SRT_TIME = re.compile(r"(\d+):(\d\d):(\d\d)[,.](\d{1,3})\s*-->\s*(\d+):(\d\d):(\d\d)[,.](\d{1,3})")
@@ -1602,7 +1860,7 @@ def transcribe(recording: Path, outdir: Path, args, stem: str, given_json: str |
         return Path(given_json)
     out_json = outdir / f"{stem}.json"
     if out_json.exists() and not args.force:
-        why = stale_reason(out_json, recording, model_key(args), args.language)
+        why = stale_reason(out_json, recording, model_key(args), spoken_language(args), normalize_switch(args.language_switch))
         if not why:
             print(f"using the existing transcription {out_json} (--force to redo it)")
             return out_json
@@ -1610,7 +1868,7 @@ def transcribe(recording: Path, outdir: Path, args, stem: str, given_json: str |
     # the same recording may have been transcribed alone before, into its own folder: reuse that
     alone = recording.parent / f"{recording.stem} notes" / f"{safe_stem(recording.stem, 'recording')}.json"
     if alone.exists() and alone.resolve() != out_json.resolve() and not args.force:
-        why = stale_reason(alone, recording, model_key(args), args.language)
+        why = stale_reason(alone, recording, model_key(args), spoken_language(args), normalize_switch(args.language_switch))
         if not why:
             print(f"using the existing transcription {alone} (--force to redo it)")
             shutil.copyfile(alone, out_json)
@@ -1623,7 +1881,15 @@ def transcribe(recording: Path, outdir: Path, args, stem: str, given_json: str |
     print(f"extracting the audio of {recording.name} ...")
     subprocess.run([ffmpeg, "-y", "-loglevel", "error", "-i", str(recording), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav)], check=True)
     try:
-        if args.engine == "macwhisper":
+        mode, plan = parse_language_switch(args.language_switch)
+        if mode != "none":  # the speech changes language: each part in its own
+            if mode == "auto":
+                plan = auto_language_plan(wav, args)
+            print("language of the speech: " + describe_plan(plan))
+            if len(plan) == 1:
+                print("note: no change of language was found; the whole recording is transcribed as " + plan[0]["language"])
+            transcribe_in_languages(wav, out_json, args, plan, outdir, args.model)
+        elif args.engine == "macwhisper":
             if args.whisper_args:
                 print("note: --whisper-args, --keep-context and --silence-threshold are for Whisper itself: MacWhisper ignores them")
             macwhisper_transcribe(wav, out_json, args)
@@ -1640,8 +1906,14 @@ def transcribe(recording: Path, outdir: Path, args, stem: str, given_json: str |
         spoken = json.loads(out_json.read_text(encoding="utf-8")).get("language")
     except (OSError, ValueError):
         spoken = None
-    write_meta(out_json, {"source": source_fingerprint(recording), "model": model_key(args), "language": spoken, "engine": args.engine})
+    write_meta(out_json, {"source": source_fingerprint(recording), "model": model_key(args), "language": spoken, "engine": args.engine,
+                          "language_switch": normalize_switch(args.language_switch)})
     return out_json
+
+
+def spoken_language(args) -> str | None:
+    """--language for the cache check: with --language-switch each part has its own language, so there is none."""
+    return None if args.language_switch else args.language
 
 
 def translation_args(args):
@@ -1690,9 +1962,13 @@ def translate_recording(recording: Path, outdir: Path, args, stem: str, lang: st
             print(f"extracting the audio of {recording.name} again, to translate it ...")
             subprocess.run([tool("ffmpeg"), "-y", "-loglevel", "error", "-i", str(recording), "-vn", "-ac", "1", "-ar", "16000",
                             "-c:a", "pcm_s16le", str(wav)], check=True)
-            cmd = asr_command(args, wav, tmp, model, args.language or lang, task="translate")
-            print(f"translating with {args.engine} whisper (this takes a while):", show_command(cmd))
-            subprocess.run(cmd, check=True)
+            plan = switch_plan_of(outdir / f"{stem}.json")  # the speech changes language: translate each part in its own
+            if plan:
+                transcribe_in_languages(wav, tmp / f"{stem}.json", args, plan, tmp, model, task="translate")
+            else:
+                cmd = asr_command(args, wav, tmp, model, args.language or lang, task="translate")
+                print(f"translating with {args.engine} whisper (this takes a while):", show_command(cmd))
+                subprocess.run(cmd, check=True)
             shutil.move(str(tmp / f"{stem}.json"), out_json)
             write_meta(out_json, {"source": source_fingerprint(recording), "model": model})
         finally:
@@ -3387,6 +3663,12 @@ def main() -> int:
                     "large-v3-turbo); with --engine mlx also a Hugging Face repository or a local model folder; with MacWhisper the "
                     "model selected in the app is used, unless this is one of its ids, provider:name (see `mw models list`)")
     ap.add_argument("--language", help="spoken language, e.g. en or pt (default: whisper detects it)")
+    ap.add_argument("--language-switch", metavar="auto|PLAN",
+                    help="the speech changes language inside a recording, so Whisper's single language per file would be wrong for "
+                         "part of it. auto: the script finds where (it checks the language every minute, then puts each cut at "
+                         "the nearest pause); or give the plan, e.g. \"pt 04:30 en\" = Portuguese until 4 min 30 s, then English "
+                         "(\"pt 04:30 en 1:10:00 pt\" has three parts; times are m:ss or h:mm:ss). Each part is transcribed in its own "
+                         "language; --language is not used")
     ap.add_argument("--whisper-args", help="extra arguments for the whisper program of the engine, as one quoted string "
                     "(with mlx, given as options of mlx_whisper.transcribe, e.g. \"--initial-prompt 'Lecture on algorithms'\")")
     ap.add_argument("--keep-context", action="store_true",
@@ -3478,6 +3760,12 @@ def main() -> int:
         parse_parts(args.notes_parts)
     except ValueError as e:
         ap.error(str(e))
+    try:
+        parse_language_switch(args.language_switch)
+    except ValueError as e:
+        ap.error(str(e))
+    if args.language_switch and args.language:
+        print("note: --language-switch gives the language of each part, so --language is not used")
     if args.notes_ai_command and args.notes_ai in ("auto", "none"):
         ap.error("--notes-ai-command needs --notes-ai claude, agy or copilot, to say which AI the program is")
     if args.notes_only:

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **`--language-switch`: recordings whose speech changes language.** Whisper uses one language per file, so a lecture that
+  goes from Portuguese to English came out wrong in one of them. `--language-switch "pt 04:30 en"` (times `m:ss` or `h:mm:ss`)
+  transcribes each part in its own language; `--language-switch auto` finds the changes itself (Whisper's language detector on a
+  window every minute, refined to about 5 s, cut at the nearest pause). The parts are merged into one transcript with continuous
+  timestamps, the plan is recorded in the cache, and the translation for English slides is made part by part. Tried on
+  synthetic speech only (found the change at the right pause); check the plan on a real lecture.
+
 - **One notes folder per AI**: the student notes of each AI go in `reading-notes-claude`, `reading-notes-agy` or
   `reading-notes-copilot`, so two AIs never overwrite each other and each revises only its own earlier notes. An existing
   folder called just `reading-notes` is reused by Claude Code (unless `reading-notes-claude` exists).

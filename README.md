@@ -169,6 +169,7 @@ python3 lecture2notes.py slides.pptx lecture.mov --switch-penalty 0.3
 | `--separate` | Each recording is its own lecture with its own folder. On by default when you pass a folder. A `.pptx` (or else `.pdf`) with the same name as a recording is used for it if you gave no slides. |
 | `-o, --outdir DIR` | Output folder. With `--separate` or a folder, this is the parent of the per-lecture folders. |
 | `--name NAME` | Name used in titles and file names. |
+| `--language-switch auto\|"pt 04:30 en"` | The speech changes language inside the recording: `auto` finds where, or give the plan (language, time, language, ...; times `m:ss` or `h:mm:ss`). Each part is transcribed in its own language. See "A recording that changes language". |
 | `--language en\|pt\|…` | Spoken language (default: Whisper detects it). Also picks the tesseract OCR language. |
 | `--engine auto\|macwhisper\|mlx\|openai` | Speech recognition. `auto` (default): MacWhisper on a Mac that has it with its `mw` tool, else mlx-whisper on Apple Silicon, else openai-whisper (always on Linux and Windows). `macwhisper` = the MacWhisper app; `mlx` = mlx-whisper; `openai` = the openai-whisper command line. See "Which speech engine". |
 | `--mlx-command PATH` | The `mlx_whisper` program (default: `mlx_whisper` in PATH, else `~/.venvs/whisper/bin/mlx_whisper`). |
@@ -394,6 +395,29 @@ The script detects the language of the speech (from the transcript) and of the s
 
 The translation is a second Whisper pass, so it takes about as long as the transcription again. It uses the `medium` model, which Whisper downloads on first use (about 1.5 GB). Use `--cross-language translate` to force a translation, or `--cross-language off` to skip it.
 
+### A recording that changes language
+
+Whisper chooses **one language per file**, from the first 30 seconds. A lecture that starts in Portuguese and goes on in English (or the other way round) is therefore transcribed in the wrong language for part of it: the other part is garbled, translated, or partly lost. `--language-switch` fixes this by cutting the audio where the language changes and transcribing each part in its own language, then joining them into one transcript with continuous timestamps.
+
+```bash
+# the script finds where the language changes (and puts the cut at the nearest pause)
+python3 lecture2notes.py slides.pptx lecture.mov --language-switch auto
+
+# or you say where: Portuguese until 4 min 30 s, then English
+python3 lecture2notes.py slides.pptx lecture.mov --language-switch "pt 04:30 en"
+
+# more changes: Portuguese, English from 4:30, Portuguese again from 1 h 10 min
+python3 lecture2notes.py slides.pptx lecture.mov --language-switch "pt 04:30 en 1:10:00 pt"
+```
+
+- **The plan** is a language code, then a time and the next language, and so on. Times are `m:ss` (`04:30` is four minutes thirty seconds, **not** hours and minutes as in `--notes-parts`), `h:mm:ss` (`1:10:00`), or seconds (`270s`).
+- **`auto`** asks Whisper's own language detector about a 30-second window every minute (with the model of the run, or with mlx-whisper or openai-whisper if you use MacWhisper), ignores a language that holds for less than two windows in a row (a quoted sentence is not a switch), places each change within about 5 seconds by looking at shorter windows, and moves the cut to the middle of the nearest pause, so that no word is cut in two. It prints what it found (`pt from 00:00:00, then en from 00:02:43`). If the cut is not right, give the plan yourself.
+- **It is remembered**: the transcription records the plan, and a later run reuses it. A different `--language-switch` (or none) transcribes again.
+- **With English slides** the speech is matched to them as before; the translation to English, if needed, is made part by part, each in its own language.
+- **`--language`** is not used with `--language-switch`, since each part has its own. The language of the whole recording, for the messages, is the first one.
+- In a test with synthetic speech (2 min 43 s of Portuguese, then English), `auto` found the change at 2:43, in the pause between the two. Without the option, Whisper lost the first 13 seconds of the English. Real speech, with noise and accents, is harder, so check the first run's plan.
+- Not combined with `--whisper-json` (that file is used as it is), and it needs a recording with audio.
+
 ## Limits
 
 - **The slide assignment is approximate.** It is most reliable when the slide number is visible in the recording. When only the words are used, it is weakest on slides with repeated or code-only content, or when you talk about several slides together. Every section shows its timestamps so you can check it.
@@ -425,7 +449,7 @@ is read). Its main parts, in file order:
 `align`, `align_pinned`, `clean_numbers`, `to_global`, `drop_repetitions`, `detect_language`, `key_sentences`,
 `lecture_label`, `tex_escape`, `fill_template`, `stale_reason`, `parse_srt` and `parse_mw_json` take and return plain data, so they are easy to test without any recording.
 
-**Tests.** `tests/test_lecture2notes.py` uses only the standard library (43 tests: the pure functions, the choice of AI and how each one is run and read (with a fake agy), the notes in parts and the kit's build script, the choice of
+**Tests.** `tests/test_lecture2notes.py` uses only the standard library (53 tests: the pure functions, the choice of AI and how each one is run and read (with a fake agy), the notes in parts and the kit's build script, the choice of
 engine by platform, the MacWhisper integration with a fake `mw`, the install offer with a fake terminal and brew, the
 command line, and a smoke test that makes a short video, gives the script a fake Whisper transcription and checks the
 files written). Run them from the repository folder:

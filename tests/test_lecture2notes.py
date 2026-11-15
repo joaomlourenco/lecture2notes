@@ -267,6 +267,137 @@ class AIChoice(unittest.TestCase):
         self.assertIsNone(self.read("agy", ["not json\n"])[0])
 
 
+class LanguageSwitch(unittest.TestCase):
+    def test_parse_the_plan(self):
+        self.assertEqual(m.parse_language_switch(None), ("none", None))
+        self.assertEqual(m.parse_language_switch("  "), ("none", None))
+        self.assertEqual(m.parse_language_switch("AUTO"), ("auto", None))
+        self.assertEqual(m.parse_language_switch("pt 04:30 en"),
+                         ("fixed", [{"language": "pt", "start": 0.0}, {"language": "en", "start": 270.0}]))
+        mode, plan = m.parse_language_switch("pt 4:30, en 1:10:00 pt")  # commas are fine; h:mm:ss for the later times
+        self.assertEqual([(p["language"], p["start"]) for p in plan], [("pt", 0.0), ("en", 270.0), ("pt", 4200.0)])
+        self.assertEqual(m.parse_language_switch("pt 90s en")[1][1]["start"], 90.0)
+        for bad in ("pt", "pt 04:30", "pt en 04:30", "pt 04:99 en", "pt 04:30 en 03:00 pt", "pt 0:00 en", "portuguese 04:30 en", "auto pt"):
+            with self.assertRaises(ValueError, msg=bad):
+                m.parse_language_switch(bad)
+
+    def test_clock_forms(self):
+        self.assertEqual([m.parse_clock(t) for t in ("04:30", "1:04:30", "01:04:30", "270s", "2.5s", "4", "04:75", "x")],
+                         [270, 3870, 3870, 270.0, 2.5, None, None, None])
+        self.assertEqual(m.normalize_switch("  PT  04:30,EN "), "pt 04:30 en")
+        self.assertIsNone(m.normalize_switch(" "))
+
+    @staticmethod
+    def detector(*switches, none_at=(), outlier_at=()):
+        """A fake language detector for a speech that is pt until the first switch time, then en, then pt again, ...: the language of a
+        window is the one of most of it. None for the starts in none_at (silence); a wrong answer for those in outlier_at."""
+        def lang_at(t):
+            return ["pt", "en"][sum(t >= x for x in switches) % 2]
+
+        def detect(jobs):
+            out = []
+            for t, w in jobs:
+                if round(t) in none_at:
+                    out.append(None)
+                    continue
+                lang = lang_at(t + w / 2)
+                out.append(("en" if lang == "pt" else "pt") if round(t) in outlier_at else lang)
+            return out
+        return detect
+
+    def test_finding_one_switch(self):
+        plan = m.find_language_switches(self.detector(272.0), 600.0)
+        self.assertEqual([p["language"] for p in plan], ["pt", "en"])
+        self.assertEqual(plan[0]["start"], 0.0)
+        self.assertAlmostEqual(plan[1]["start"], 272.0, delta=4.0)
+
+    def test_finding_two_switches_and_ignoring_noise(self):
+        plan = m.find_language_switches(self.detector(272.0, 1500.0, none_at=(600,), outlier_at=(60,)), 2400.0)
+        self.assertEqual([p["language"] for p in plan], ["pt", "en", "pt"])
+        self.assertAlmostEqual(plan[1]["start"], 272.0, delta=4.0)
+        self.assertAlmostEqual(plan[2]["start"], 1500.0, delta=4.0)
+
+    def test_no_switch_and_no_speech(self):
+        self.assertEqual(m.find_language_switches(self.detector(), 300.0), [{"language": "pt", "start": 0.0}])
+        self.assertEqual(m.find_language_switches(lambda jobs: [None] * len(jobs), 300.0), [])
+
+    def test_shift_segments(self):
+        out = m.shift_segments([{"start": 1.0, "end": 2.0, "text": "a", "words": [{"word": "a", "start": 1.0, "end": 2.0}]}], 100.0)
+        self.assertEqual((out[0]["start"], out[0]["end"], out[0]["words"][0]["start"]), (101.0, 102.0, 101.0))
+
+    def test_the_cache_knows_the_switch(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            rec, js = d / "a.mov", d / "a.json"
+            rec.write_bytes(b"x" * 10)
+            js.write_text("{}")
+            m.write_meta(js, {"source": m.source_fingerprint(rec), "model": "turbo", "language": "pt", "language_switch": "pt 04:30 en"})
+            self.assertIsNone(m.stale_reason(js, rec, "turbo", None, "pt 04:30 en"))
+            self.assertIn("pt 04:30 en", m.stale_reason(js, rec, "turbo", None, "auto"))
+            self.assertIn("off", m.stale_reason(js, rec, "turbo", None, None))
+            m.write_meta(js, {"source": m.source_fingerprint(rec), "model": "turbo", "language": "pt"})  # an older record: no switch
+            self.assertIsNone(m.stale_reason(js, rec, "turbo", None, None))
+            self.assertIn("auto", m.stale_reason(js, rec, "turbo", None, "auto"))
+
+    def test_a_bad_plan_is_refused_by_the_command_line(self):
+        r = subprocess.run([sys.executable, "-B", str(SCRIPT), "x.mov", "--language-switch", "pt 04:30"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--language-switch", r.stderr)
+
+
+@unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
+class LanguageSwitchWithAudio(unittest.TestCase):
+    def setUp(self):  # the script finds ffmpeg through ENV, which main() fills; here we do it
+        patcher = mock.patch.dict(m.ENV, {"ffmpeg": shutil.which("ffmpeg")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def silence_wav(self, path, seconds):
+        import wave
+
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(b"\0\0" * 16000 * seconds)
+
+    def test_each_part_is_transcribed_in_its_language_and_merged(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            wav = d / "a.wav"
+            self.silence_wav(wav, 10)
+            seen = []
+
+            def fake_asr(args, piece, outdir, model, language, task=None):  # a program that writes one segment saying its language
+                seen.append((piece.name, language, task))
+                code = "import json,sys; json.dump({'segments':[{'start':0.5,'end':1.5,'text':sys.argv[2]}]}, open(sys.argv[1],'w'))"
+                return [sys.executable, "-c", code, str(outdir / f"{piece.stem}.json"), f"said in {language}"]
+
+            plan = [{"language": "pt", "start": 0.0}, {"language": "en", "start": 4.0}, {"language": "pt", "start": 7.0}]
+            args = argparse.Namespace(engine="mlx")
+            with mock.patch.object(m, "asr_command", fake_asr), mock.patch.object(sys, "stdout", io.StringIO()):
+                m.transcribe_in_languages(wav, d / "out.json", args, plan, d, "turbo")
+            data = json.loads((d / "out.json").read_text(encoding="utf-8"))
+            self.assertEqual([(s["start"], s["text"]) for s in data["segments"]],
+                             [(0.5, "said in pt"), (4.5, "said in en"), (7.5, "said in pt")])
+            self.assertEqual((data["language"], data["language_switch"]), ("pt", plan))
+            self.assertEqual([x[1] for x in seen], ["pt", "en", "pt"])
+            self.assertFalse(list(d.glob(".*pieces")))  # the pieces are removed
+            self.assertEqual(m.switch_plan_of(d / "out.json"), plan)
+
+    def test_a_cut_moves_to_the_middle_of_a_pause(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            wav = d / "a.wav"
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=5:sample_rate=16000",
+                            "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono", "-f", "lavfi", "-i", "sine=frequency=330:duration=5:sample_rate=16000",
+                            "-filter_complex", "[1:a]atrim=0:1.2[s];[0:a][s][2:a]concat=n=3:v=0:a=1[a]", "-map", "[a]", "-ac", "1",
+                            "-c:a", "pcm_s16le", str(wav)], check=True)  # tone 0-5 s, silence 5-6.2 s, tone 6.2-11.2 s
+            self.assertAlmostEqual(m.snap_to_pause(wav, 4.0), 5.6, delta=0.3)
+            self.assertEqual(m.snap_to_pause(wav, 2.0, reach=1.0), 2.0)  # no pause within reach: unchanged
+
+
 class NotesFolders(unittest.TestCase):
     def test_one_folder_per_ai_and_claude_may_reuse_the_old_name(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.object(sys, "stdout", io.StringIO()):
