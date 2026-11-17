@@ -270,15 +270,26 @@ keep participants anonymous; leave out unverified anecdotes; and never reveal an
 The AI revises them against the new transcript instead of starting over, and writes `CHANGES.md`. `--notes-fresh`
 starts from scratch. The kit files are kept between runs, so your own changes to them survive.
 
-**One set of notes per part.** A long recording often holds distinct parts (a lecturer and two guest speakers, a lecture followed by a workshop). With `--notes-parts` the AI writes **one complete set of notes for each part**, instead of one big document:
+**One set of notes per lecture (or part), even when they share one video.** A recording often holds distinct lectures or parts (two lectures recorded in one go, a lecturer and two guest speakers, a lecture followed by a workshop). With `--notes-parts` the AI writes **one complete set of notes for each**, instead of one big document. The transcript stays one; only the student notes are split.
 
 ```bash
-# the AI finds the two parts in the transcript
+# the easiest: the AI finds the lectures in the transcript, however many there are
+python3 lecture2notes.py lecture.mov --student-notes --notes-parts auto
+
+# the AI finds exactly two
 python3 lecture2notes.py lecture.mov --student-notes --notes-parts 2
 
-# or you say where the later parts begin (times as in the transcript): two parts, cut at 02:27
+# you say where the later parts begin (times as in the transcript): two parts, cut at 02:27
 python3 lecture2notes.py lecture.mov --student-notes --notes-parts 02:27
+
+# you name them (a date in a name becomes that lecture's date); the AI finds the cuts
+python3 lecture2notes.py lecture.mov --student-notes --notes-part-names "Lecture 1: Sorting (12 Nov); Lecture 2: Searching (13 Nov)"
 ```
+
+- **`auto`** lets the AI decide how many lectures the recording holds, looking for a change of day, lecturer, subject or activity, or a long break. If it is one lecture, you get one set of notes. The AI says in each document where its part begins and ends, and the script reports how many it found.
+- **`--notes-part-names "A; B; ..."`** (separated by semicolons) names the parts in order. Each name becomes the title of its notes, and a date in it the date of that lecture. Without `--notes-parts` it implies as many parts as names, with the cuts found by the AI; with a number or times, the count must match.
+- Each part gets its own title and its own `date`, taken from what the transcript, the slides, the names and `--notes-context` say about that part.
+- When the run ends, the script lists the part files with the title of each.
 
 You get `<name>.part1.reading-notes.md` / `.pdf` / `.docx`, `<name>.part2...`, and so on. Each part stands alone, with its own title, key messages, chapters, review questions and glossary, covers only its own stretch of the recording without repeating the others, and has figures named `fig-p1-…`, `fig-p2-…` in the shared `figures/` folder. `sh build/build.sh` builds all the parts in one go. If a one-document version exists, the AI uses it as the starting point (`CHANGES.md` says how it was split) and, when the parts are done, it is moved to `superseded/` in the AI's folder, not deleted.
 
@@ -315,7 +326,7 @@ lecturer from the slides, or from `--notes-context`, and leaves the line out if 
 about a person or a course is built into the script.
 
 **Options:** `--notes-language` (default English), `--notes-context`, `--notes-author` (the author line),
-`--notes-course` (PDF running header), `--notes-parts N|TIMES` (one set of notes per part), `--notes-only`,
+`--notes-course` (PDF running header), `--notes-parts auto|N|TIMES` and `--notes-part-names` (one set of notes per lecture or part), `--notes-only`,
 `--notes-extra FILE` (repeatable), `--notes-prompt FILE`, `--notes-ai`, `--notes-ai-command`, `--notes-ai-args`,
 `--notes-model`, `--notes-budget USD` (Claude Code only), `--notes-fresh`, `--claude-command`.
 
@@ -449,7 +460,7 @@ is read). Its main parts, in file order:
 `align`, `align_pinned`, `clean_numbers`, `to_global`, `drop_repetitions`, `detect_language`, `key_sentences`,
 `lecture_label`, `tex_escape`, `fill_template`, `stale_reason`, `parse_srt` and `parse_mw_json` take and return plain data, so they are easy to test without any recording.
 
-**Tests.** `tests/test_lecture2notes.py` uses only the standard library (53 tests: the pure functions, the choice of AI and how each one is run and read (with a fake agy), the notes in parts and the kit's build script, the choice of
+**Tests.** `tests/test_lecture2notes.py` uses only the standard library (57 tests: the pure functions, the choice of AI and how each one is run and read (with a fake agy), the notes in parts and the kit's build script, the choice of
 engine by platform, the MacWhisper integration with a fake `mw`, the install offer with a fake terminal and brew, the
 command line, and a smoke test that makes a short video, gives the script a fake Whisper transcription and checks the
 files written). Run them from the repository folder:

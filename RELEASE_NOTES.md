@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Separate student notes for each lecture, even when they share one video**, made easier: `--notes-parts auto` lets the AI find
+  the lectures (however many, one if there is one), and `--notes-part-names "Lecture 1: Sorting (12 Nov); Lecture 2: Searching
+  (13 Nov)"` names them (a date in a name becomes that lecture's date; names alone imply as many parts, cuts found by the AI).
+  Each part gets its own title and date. At the end the script lists the part files with their titles. `--notes-parts N` and
+  times work as before.
+
 - **`--language-switch`: recordings whose speech changes language.** Whisper uses one language per file, so a lecture that
   goes from Portuguese to English came out wrong in one of them. `--language-switch "pt 04:30 en"` (times `m:ss` or `h:mm:ss`)
   transcribes each part in its own language; `--language-switch auto` finds the changes itself (Whisper's language detector on a

@@ -3092,45 +3092,104 @@ PART_TIME = re.compile(r"(?:P\d+ )?\d+:\d\d(?::\d\d)?")  # 02:27, 01:05:30, or P
 
 
 def parse_parts(spec: str | None) -> tuple[int, list[str] | None]:
-    """--notes-parts: a number N (Claude finds N parts) or the times where the parts after the first begin, e.g. "02:27" (two
-    parts) or "01:00,02:30" (three). Returns (number of parts, the times or None). Raises ValueError for anything else."""
+    """--notes-parts: "auto" (the AI finds the lectures, however many: 0 here), a number N (the AI finds N parts), or the times
+    where the parts after the first begin, e.g. "02:27" (two parts) or "01:00,02:30" (three). Returns (number of parts, the times
+    or None); 1 is one document. Raises ValueError for anything else."""
     if not spec or not spec.strip():
         return 1, None
     s = spec.strip()
+    if s.lower() == "auto":
+        return 0, None
     if s.isdigit() and int(s) >= 1:
         return int(s), None
     points = [t.strip() for t in s.split(",") if t.strip()]
     if points and all(PART_TIME.fullmatch(t) for t in points):
         return len(points) + 1, points
-    raise ValueError(f"--notes-parts must be a number of parts (e.g. 2) or the times where the later parts begin (e.g. 02:27 or "
-                     f"01:00,02:30), not {spec!r}")
+    raise ValueError(f"--notes-parts must be auto, a number of parts (e.g. 2) or the times where the later parts begin (e.g. 02:27 "
+                     f"or 01:00,02:30), not {spec!r}")
+
+
+def parse_part_names(text: str | None) -> list[str]:
+    """--notes-part-names: the names (or dates) of the parts, in order, separated by semicolons or new lines."""
+    return [x.strip() for x in re.split(r"[;\n]", text or "") if x.strip()]
+
+
+def resolve_parts(spec: str | None, names_text: str | None) -> tuple[int, list[str] | None, list[str]]:
+    """(number of parts, cut times or None, names) from --notes-parts and --notes-part-names. 1 = one document, 0 = the AI decides
+    how many. Names given without a count make that many parts, with the cuts found by the AI. Raises ValueError if they disagree."""
+    n, points = parse_parts(spec)
+    names = parse_part_names(names_text)
+    if names:
+        if len(names) < 2:
+            raise ValueError("--notes-part-names needs one name for each part, so at least two (separated by semicolons); for a single "
+                             "lecture use --notes-context")
+        if spec and spec.strip().lower() != "auto" and n != len(names):
+            raise ValueError(f"--notes-parts gives {n} parts but --notes-part-names gives {len(names)} names")
+        n = len(names)
+    return n, points, names
 
 
 def part_files(fstem: str, n: int) -> list[str]:
-    """The notes files: one for the lecture, or <name>.partK.reading-notes.md for each of n parts."""
+    """The notes files: one for the lecture, or <name>.partK.reading-notes.md for each of n parts ([] when the AI decides n)."""
+    if n == 0:
+        return []
     return [f"{fstem}.reading-notes.md"] if n == 1 else [f"{fstem}.part{k}.reading-notes.md" for k in range(1, n + 1)]
 
 
-def parts_prompt(files: list[str], points: list[str] | None, revising: bool) -> str:
-    """The section added to the prompt when the lecture gets one set of notes per part."""
-    n = len(files)
-    how = (f"The parts begin at these times of the recording (the first at its start, the last ends with it): "
-           f"{', '.join(points)}. Find the exact place of each cut in the transcript, at the pause or change of topic nearest to it."
-           if points else
-           f"Find the {n} natural parts of the lecture in the transcript: a change of speaker, a break, a change of activity or "
-           "of subject. Say in each part's \"How to use these notes\" where it begins and ends in the recording.")
+def part_paths(folder: Path, fstem: str) -> list[Path]:
+    """The part files that are in a folder, in order of their number."""
+    found = folder.glob(f"{fstem}.part*.reading-notes.md")
+    return sorted(found, key=lambda f: int((re.search(r"\.part(\d+)\.", f.name) or [0, 0])[1]))
+
+
+def notes_title(path: Path) -> str:
+    """The title in the YAML header of a notes file ('' if it has none)."""
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines()[:25]:
+            m = re.match(r'title:\s*"?(.*?)"?\s*$', line)
+            if m:
+                return m[1].replace("\\", "")
+    except OSError:
+        pass
+    return ""
+
+
+def parts_prompt(fstem: str, n: int, points: list[str] | None, revising: bool, names: list[str] = ()) -> str:
+    """The section added to the prompt when the recording gets one set of notes per part (per lecture). n = 0: the AI decides how many."""
+    if n:
+        files = part_files(fstem, n)
+        what = f"**{n} separate sets of notes, one for each part of the lecture, not one document**"
+        write = f"Write {n} files: " + ", ".join(f"`{f}`" for f in files) + "."
+        how = (f"The parts begin at these times of the recording (the first at its start, the last ends with it): "
+               f"{', '.join(points)}. Find the exact place of each cut in the transcript, at the pause or change of topic nearest to it."
+               if points else
+               f"Find the {n} natural parts in the transcript: a change of speaker, a break, a change of activity or of subject. "
+               "Say in each part's \"How to use these notes\" where it begins and ends in the recording.")
+    else:
+        what = "**a separate set of notes for each lecture (or part) that the recording holds, not one document**"
+        write = (f"Write one file per part, numbered from 1: `{fstem}.part1.reading-notes.md`, `{fstem}.part2.reading-notes.md`, and so "
+                 "on, as many as there are parts and with no gaps in the numbers.")
+        how = ("Find how many distinct lectures or parts the recording holds, and where each begins and ends: a change of day, "
+               "lecturer, subject or activity, or a long break between sessions. Decide the number yourself; if the recording is one "
+               "lecture, write one file. Say in each document's \"How to use these notes\" where its part begins and ends in the recording, "
+               "and in your final report how many parts you found and why you cut where you did.")
+    named = ("- The user named the parts, in order: " + "; ".join(f'{i}. "{x}"' for i, x in enumerate(names, 1)) + ". Use each name as "
+             "the title of its part (the subtitle can add the course). If a name is, or contains, a date, it is the date of that part's "
+             "lecture.\n" if names else "")
     prev = (" The previous version (see Inputs) covers the whole lecture in one document: split its content between the parts, "
             "and write `CHANGES.md` saying how. Do not delete or move the previous version's files (the `.md`, `.pdf` and `.docx` "
             "of the one-document notes): the script puts them away when you are done." if revising else "")
     return (f"\n## Separate notes for each part of the lecture\n\n"
-            f"The user wants **{n} separate sets of notes, one for each part of the lecture, not one document**. This section "
-            f"overrides the Output and Structure sections above wherever they differ.\n\n"
+            f"The user wants {what}. This section overrides the Output and Structure sections above wherever they differ.\n\n"
             f"- {how}\n"
-            f"- Write {n} files: " + ", ".join(f"`{f}`" for f in files) + ". Each is complete and stands alone: its own YAML header "
+            f"- {write} Each is complete and stands alone: its own YAML header "
             "(the title names the subject of that part; the subtitle says \"Lecture notes for part K of N of <the lecture> · <course>\"), "
             "\"How to use these notes\", \"at a glance\", chapters, a synthesis, review questions, glossary, sources and "
             "\"what comes next\" (for the last part, the next session; for the others, the next part). Chapter numbers start again at "
             "1 in each document. Put the course organisation in the part where it was said.\n"
+            f"{named}"
+            "- Each part may be a lecture of its own, on another day and with another title: set its title and its `date` from what "
+            "the transcript, the slides, the names and the context say about that part, never from another part.\n"
             "- A part covers only its own stretch of the recording: do not repeat content between parts. Where a part depends on "
             "another, say so and refer to it (\"see part 2\").\n"
             "- Figures share the folder `figures/`: start every file name with the part (`fig-p1-…`, `fig-p2-…`); a single "
@@ -3310,14 +3369,14 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
     notes_dir = notes_folder(outdir, ai_name)  # one folder per AI, so that two AIs never overwrite each other
     for sub in ("build", "figures", "inputs"):
         (notes_dir / sub).mkdir(parents=True, exist_ok=True)
-    n_parts, points = parse_parts(args.notes_parts)
-    if n_parts > 1 and transcript is None:
+    n_parts, points, part_names = resolve_parts(args.notes_parts, args.notes_part_names)  # 1: one document; 0: the AI decides
+    if n_parts != 1 and transcript is None:
         print("note: --notes-parts needs a recording; the notes from the slides alone are one document")
-        n_parts, points = 1, None
+        n_parts, points, part_names = 1, None, []
     notes_files = part_files(fstem, n_parts)
-    notes_file = notes_files[0]
+    notes_file = notes_files[0] if notes_files else f"{fstem}.part1.reading-notes.md"
     combined = f"{fstem}.reading-notes.md"  # the one-document version, which a run with parts replaces
-    print(f"\npreparing the student notes in {notes_dir}" + (f" ({n_parts} parts) ..." if n_parts > 1 else " ..."))
+    print(f"\npreparing the student notes in {notes_dir}" + (f" ({n_parts} parts) ..." if n_parts > 1 else " (the AI decides how many parts) ..." if n_parts == 0 else " ..."))
     if chosen:
         print(f"the notes will be written by {AI_TOOLS[ai_name][0]} ({ai_exe})")
 
@@ -3350,8 +3409,8 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
         extras.append(f"`inputs/{dst.name}` (from {p.name})")
 
     # previous version: revise it instead of starting from scratch
-    previous = notes_dir / (combined if n_parts > 1 else notes_file)  # with parts: the one-document version, if there is one
-    existing_parts = [notes_dir / f for f in notes_files if (notes_dir / f).exists()] if n_parts > 1 else []
+    previous = notes_dir / (combined if n_parts != 1 else notes_file)  # with parts: the one-document version, if there is one
+    existing_parts = part_paths(notes_dir, fstem) if n_parts != 1 else []
     revising = (previous.exists() or bool(existing_parts)) and not args.notes_fresh
     marker = notes_dir / "inputs" / "SLIDES-ONLY"  # the notes there were written without a recording
     from_slides = revising and marker.exists() and transcript is not None and n_parts == 1
@@ -3415,7 +3474,7 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
         ("s: " + ", ".join(r.name for r in recs) if len(recs) > 1 else ": " + recs[0].name if recs else ": none (it failed)")
     if transcript is None:
         revise = STUDENT_NOTES_REVISE_SLIDES
-    elif n_parts > 1:
+    elif n_parts != 1:
         revise = STUDENT_NOTES_REVISE_PARTS
     else:
         revise = STUDENT_NOTES_REVISE_FROM_SLIDES if from_slides else STUDENT_NOTES_REVISE
@@ -3441,8 +3500,8 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
         prompt += ("\n## About your tools\n\nThese instructions were written for Claude Code. Where they mention subagents (the Task or "
                    "Agent tools) or any tool you do not have, do that work yourself, step by step and in the same order, to the same "
                    "standard: in particular, do not skip the verification step. Read the transcript in pieces if it is long.\n")
-    if n_parts > 1:
-        prompt += parts_prompt(notes_files, points, revising)
+    if n_parts != 1:
+        prompt += parts_prompt(fstem, n_parts, points, revising, part_names)
     if args.latex == "no":
         prompt += ("\n## No PDF this time\n\nThis run has no LaTeX (none installed, or `--latex no`), so `sh build/build.sh` writes "
                    "the DOCX only. Skip the PDF everywhere above: do not try to make or look at one, and do not change `build/` to "
@@ -3482,19 +3541,23 @@ def student_notes(decks: list[Path], slides: list[dict], recs: list[Path], outdi
     elif proc.returncode:
         print(f"warning: {label} failed (exit code {proc.returncode})")
     ok_run = bool(final) and not final.get("is_error")
-    made = [notes_dir / f for f in notes_files if (notes_dir / f).exists()]
+    made = [notes_dir / f for f in notes_files if (notes_dir / f).exists()] if n_parts != 0 else part_paths(notes_dir, fstem)
     if made and transcript is not None and marker.exists() and ok_run:
         marker.unlink()  # reworked with the recording
     for out_md in made:
         out_pdf = out_md.with_suffix(".pdf")
         print(f"student notes: {out_md}" + (f" and {out_pdf.name}" if out_pdf.exists() else
                                             " (PDF not built yet: sh build/build.sh)" if args.latex == "yes" else " (no PDF: --latex no)"))
+        if n_parts != 1 and notes_title(out_md):
+            print(f"               {notes_title(out_md)}")
     if not made:
         print(f"no student notes were written; the prepared folder is {notes_dir} (you can also open it in a command-line AI and "
               "ask it to follow PROMPT.md)")
     elif n_parts > 1 and len(made) < n_parts:
         print(f"warning: only {len(made)} of the {n_parts} parts were written")
-    elif n_parts > 1 and ok_run:  # the one-document version is replaced by the parts: keep it, out of the way
+    elif n_parts == 0:
+        print(f"the AI found {len(made)} part{'s' if len(made) != 1 else ''}")
+    if made and n_parts != 1 and ok_run and (n_parts == 0 or len(made) == n_parts):  # the one-document version is replaced by the parts: keep it, out of the way
         old = [notes_dir / f"{fstem}.reading-notes{ext}" for ext in (".md", ".pdf", ".docx")]
         old = [p for p in old if p.exists()]
         if old:
@@ -3715,10 +3778,14 @@ def main() -> int:
                          "only slides are given)")
     sn.add_argument("--notes-language", default="English", help="language of the student notes (default English)")
     sn.add_argument("--notes-context", help="what the AI should know: course, audience, lecturer, e.g. \"MBA students; lecturer Prof. X\"")
-    sn.add_argument("--notes-parts", metavar="N|TIMES",
-                    help="write one set of notes for each part of the lecture instead of one document: a number of parts that "
-                         "the AI finds in the transcript (e.g. 2), or the times where the later parts begin (e.g. 02:27, or "
-                         "01:00,02:30 for three; with several recordings, e.g. \"P2 00:10:00\")")
+    sn.add_argument("--notes-parts", metavar="auto|N|TIMES",
+                    help="write one set of notes for each lecture (or part) of the recording instead of one document: auto = the AI "
+                         "finds the lectures, however many; a number N = the AI finds N parts; or the times where the later parts begin "
+                         "(e.g. 02:27, or 01:00,02:30 for three; with several recordings, e.g. \"P2 00:10:00\"). The transcript stays one")
+    sn.add_argument("--notes-part-names", metavar="NAMES",
+                    help="the name (or date) of each part, in order, separated by semicolons, e.g. \"Lecture 1: Introduction; Lecture 2: "
+                         "The EU strategy\". Each becomes the title of its notes, and a date in it the date of that lecture. Without "
+                         "--notes-parts, as many parts as names, with the cuts found by the AI")
     sn.add_argument("--notes-only", action="store_true",
                     help="only write the student notes, from the transcript of an earlier run in the same output folder: "
                          "nothing is transcribed, matched or written again (implies --student-notes)")
@@ -3757,7 +3824,7 @@ def main() -> int:
             ap.error(f"--mlx-command {args.mlx_command} not found")
         ENV["mlx_whisper"] = str(Path(exe).expanduser())
     try:
-        parse_parts(args.notes_parts)
+        resolve_parts(args.notes_parts, args.notes_part_names)
     except ValueError as e:
         ap.error(str(e))
     try:

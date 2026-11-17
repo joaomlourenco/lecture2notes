@@ -112,12 +112,39 @@ class NotesInParts(unittest.TestCase):
         self.assertEqual(m.parse_parts(None), (1, None))
         self.assertEqual(m.parse_parts("1"), (1, None))
         self.assertEqual(m.parse_parts("3"), (3, None))
+        self.assertEqual(m.parse_parts(" Auto "), (0, None))  # 0: the AI decides how many
         self.assertEqual(m.parse_parts("02:27"), (2, ["02:27"]))
         self.assertEqual(m.parse_parts("01:00, 02:30:15"), (3, ["01:00", "02:30:15"]))
         self.assertEqual(m.parse_parts("P2 00:10:00"), (2, ["P2 00:10:00"]))
         for bad in ("abc", "0", "2:7", "01:00,x"):
             with self.assertRaises(ValueError, msg=bad):
                 m.parse_parts(bad)
+
+    def test_names_of_the_parts(self):
+        self.assertEqual(m.parse_part_names(" Lecture 1: Intro; Lecture 2 ;;\nThird, with a comma "),
+                         ["Lecture 1: Intro", "Lecture 2", "Third, with a comma"])
+        self.assertEqual(m.parse_part_names(None), [])
+        self.assertEqual(m.resolve_parts(None, None), (1, None, []))
+        self.assertEqual(m.resolve_parts("auto", None), (0, None, []))
+        self.assertEqual(m.resolve_parts(None, "A; B; C"), (3, None, ["A", "B", "C"]))  # names alone: that many parts
+        self.assertEqual(m.resolve_parts("auto", "A; B"), (2, None, ["A", "B"]))
+        self.assertEqual(m.resolve_parts("02:27", "A; B"), (2, ["02:27"], ["A", "B"]))
+        self.assertEqual(m.resolve_parts("2", "A; B")[0], 2)
+        for spec, names in (("3", "A; B"), ("02:27", "A; B; C"), (None, "only one")):
+            with self.assertRaises(ValueError, msg=(spec, names)):
+                m.resolve_parts(spec, names)
+
+    def test_part_paths_and_titles(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            for k in (10, 2, 1):
+                (d / f"L.part{k}.reading-notes.md").write_text(f'---\ntitle: "Lecture {k}: \\_x"\n---\n', encoding="utf-8")
+            (d / "L.reading-notes.md").write_text("# one document\n")
+            (d / "Other.part1.reading-notes.md").write_text("x")
+            self.assertEqual([p.name for p in m.part_paths(d, "L")],
+                             ["L.part1.reading-notes.md", "L.part2.reading-notes.md", "L.part10.reading-notes.md"])
+            self.assertEqual(m.notes_title(d / "L.part2.reading-notes.md"), "Lecture 2: _x")
+            self.assertEqual(m.notes_title(d / "L.reading-notes.md"), "")
 
     def test_the_kit_is_prepared_without_pandoc(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(m.ENV, {"pandoc": None}):
@@ -139,14 +166,21 @@ class NotesInParts(unittest.TestCase):
         self.assertEqual(m.part_files("L", 2), ["L.part1.reading-notes.md", "L.part2.reading-notes.md"])
 
     def test_parts_prompt(self):
-        files = m.part_files("L", 2)
-        text = m.parts_prompt(files, ["02:27"], revising=True)
+        text = m.parts_prompt("L", 2, ["02:27"], revising=True)
         for needle in ("2 separate sets", "L.part1.reading-notes.md", "L.part2.reading-notes.md", "02:27", "fig-p1", "CHANGES.md",
-                       "Do not delete or move the previous version"):
+                       "Do not delete or move the previous version", "its `date`"):
             self.assertIn(needle, text)
-        free = m.parts_prompt(files, None, revising=False)
+        free = m.parts_prompt("L", 2, None, revising=False)
         self.assertIn("Find the 2 natural parts", free)
         self.assertNotIn("CHANGES.md", free)
+        self.assertNotIn("The user named the parts", free)
+        named = m.parts_prompt("L", 2, None, False, ["Lecture 1: Intro", "12 Nov 2026"])
+        self.assertIn('1. "Lecture 1: Intro"; 2. "12 Nov 2026"', named)
+        auto = m.parts_prompt("L", 0, None, False)
+        for needle in ("a separate set of notes for each lecture", "numbered from 1", "Decide the number yourself", "L.part1.reading-notes.md",
+                       "how many parts you found"):
+            self.assertIn(needle, auto)
+        self.assertNotIn("Write 0 files", auto)
 
     @unittest.skipIf(sys.platform == "win32", "runs the kit's sh script")
     def test_build_script_builds_every_notes_file(self):
@@ -642,6 +676,28 @@ class NotesPartsEndToEnd(unittest.TestCase):
             self.assertFalse((out / "v.notes.md").stat().st_mtime > (notes / "PROMPT.md").stat().st_mtime)  # nothing was rewritten
 
 
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs ffmpeg")
+class NotesPartsNamed(unittest.TestCase):
+    def test_names_alone_make_that_many_parts(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=320x180:d=6:r=5", str(d / "v.mp4")], check=True)
+            (d / "w.json").write_text(json.dumps({"language": "en", "segments": [
+                {"start": 0, "end": 3, "text": " Hello and welcome to this lecture about algorithms and sorting."}]}), encoding="utf-8")
+            run = lambda *a: subprocess.run([sys.executable, "-B", str(SCRIPT), str(d / "v.mp4"), "-o", str(d / "out"), "--install", "no", *a],
+                                            capture_output=True, text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
+            self.assertEqual(run("--whisper-json", str(d / "w.json"), "--video-sync", "off", "--latex", "no").returncode, 0)
+            r = run("--notes-only", "--notes-ai", "none", "--notes-part-names", "Lecture 1: Sorting; 13 November: Searching")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            prompt = (d / "out" / "reading-notes-claude" / "PROMPT.md").read_text(encoding="utf-8")
+            self.assertIn("2 separate sets of notes", prompt)
+            self.assertIn('1. "Lecture 1: Sorting"; 2. "13 November: Searching"', prompt)
+            r = run("--notes-only", "--notes-ai", "none", "--notes-parts", "auto")
+            prompt = (d / "out" / "reading-notes-claude" / "PROMPT.md").read_text(encoding="utf-8")
+            self.assertIn("Decide the number yourself", prompt)
+            self.assertIn("(the AI decides how many parts)", r.stdout)
+
+
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe") and sys.platform != "win32", "needs ffmpeg and sh")
 class AIEndToEnd(unittest.TestCase):
     """The whole control flow with a fake `agy` (a shell script that writes the notes file and emits agy's events)."""
@@ -674,6 +730,27 @@ class AIEndToEnd(unittest.TestCase):
             self.assertFalse((d / "out" / "reading-notes").exists())
             prompt = (folder / "PROMPT.md").read_text(encoding="utf-8")
             self.assertIn("About your tools", prompt)  # the note for AIs that are not Claude Code
+
+    def test_the_parts_an_ai_finds_are_listed_with_their_titles(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=320x180:d=6:r=5", str(d / "v.mp4")], check=True)
+            (d / "w.json").write_text(json.dumps({"language": "en", "segments": [
+                {"start": 0, "end": 3, "text": " Hello and welcome to this lecture about algorithms and sorting."}]}), encoding="utf-8")
+            fake = d / "fake-agy"
+            fake.write_text('#!/bin/sh\n'
+                            'printf -- \'---\\ntitle: "First lecture: sorting"\\n---\\n\' > v.part1.reading-notes.md\n'
+                            'printf -- \'---\\ntitle: "Second lecture: searching"\\n---\\n\' > v.part2.reading-notes.md\n'
+                            'echo \'{"event":"result","result":{"status":"SUCCESS","response":"Found 2 parts","num_turns":1}}\'\n')
+            fake.chmod(0o755)
+            run = lambda *a: subprocess.run([sys.executable, "-B", str(SCRIPT), str(d / "v.mp4"), "-o", str(d / "out"), "--install", "no", *a],
+                                            capture_output=True, text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
+            self.assertEqual(run("--whisper-json", str(d / "w.json"), "--video-sync", "off", "--latex", "no").returncode, 0)
+            r = run("--notes-only", "--notes-parts", "auto", "--notes-ai", "agy", "--notes-ai-command", str(fake))
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("the AI found 2 parts", r.stdout)
+            self.assertIn("First lecture: sorting", r.stdout)
+            self.assertIn("Second lecture: searching", r.stdout)
 
 
 if __name__ == "__main__":
