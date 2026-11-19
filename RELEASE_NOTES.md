@@ -6,7 +6,8 @@
   the lectures (however many, one if there is one), and `--notes-part-names "Lecture 1: Sorting (12 Nov); Lecture 2: Searching
   (13 Nov)"` names them (a date in a name becomes that lecture's date; names alone imply as many parts, cuts found by the AI).
   Each part gets its own title and date. At the end the script lists the part files with their titles. `--notes-parts N` and
-  times work as before.
+  times work as before. With several slide decks (one per lecture), give them all in lecture order: the prompt now tells the
+  AI to use the deck markers of the transcript to see which deck each part was taught from, so each part cites its own slides.
 
 - **`--language-switch`: recordings whose speech changes language.** Whisper uses one language per file, so a lecture that
   goes from Portuguese to English came out wrong in one of them. `--language-switch "pt 04:30 en"` (times `m:ss` or `h:mm:ss`)

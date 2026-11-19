@@ -181,6 +181,9 @@ class NotesInParts(unittest.TestCase):
                        "how many parts you found"):
             self.assertIn(needle, auto)
         self.assertNotIn("Write 0 files", auto)
+        for t in (text, auto):  # several decks: the deck markers say which slides belong to which part
+            self.assertIn("which deck each part was taught from", t)
+            self.assertIn("inputs/slides.md", t)
 
     @unittest.skipIf(sys.platform == "win32", "runs the kit's sh script")
     def test_build_script_builds_every_notes_file(self):
